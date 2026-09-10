@@ -37,6 +37,10 @@ We will actually be using USDC and WBTC at first, because BTC is not natively av
 
 # Risks
 
-Loss!
+### Emergency Withdrawal
+Emergency withdrawal needs to be able to withdraw funds quickly and unconditionally, but also must not be publicly callable. This is needed in case a bug is discovered within Aqua or within the ATLIS strategy.
 
 # AI disclaimer
+As of this commit, the `StraddleVault.sol` file has been written by Claude with minimal changes from me, a human being.
+
+As of this commit, the `specs.md` file has been written by Claude.
