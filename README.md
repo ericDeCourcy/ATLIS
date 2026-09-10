@@ -1,46 +1,66 @@
-# ATLIS
+## Foundry
 
-"ATLIS" stands for "**A**utomated **T**ime-decaying **L**P **I**nvestment **S**trategies.
+**Foundry is a blazing fast, portable and modular toolkit for Ethereum application development written in Rust.**
 
-The general idea is that ATLIS will create an LP position over a price band for some asset pair, with the goal of accumulating one asset over time. Periodically, ATLIS will rebalance your position, selling small portions of the volatile asset while in profit.
+Foundry consists of:
 
-ATLIS will track PnL automatically and divert some portion of profits into a "tax-savings" wallet for ease of use.
+- **Forge**: Ethereum testing framework (like Truffle, Hardhat and DappTools).
+- **Cast**: Swiss army knife for interacting with EVM smart contracts, sending transactions and getting chain data.
+- **Anvil**: Local Ethereum node, akin to Ganache, Hardhat Network.
+- **Chisel**: Fast, utilitarian, and verbose solidity REPL.
 
-# Integrations
+## Documentation
 
-1inch Aqua
+https://book.getfoundry.sh/
 
-# USDC-BTC pair
+## Usage
 
-The first iteration of ATLIS will specifically focus on the BTC/USDC pair, with the intention of using USDC to buy and sell BTC and gain more USDC.
+### Build
 
-We will actually be using USDC and WBTC at first, because BTC is not natively available. 
+```shell
+$ forge build
+```
 
-# How it works
+### Test
 
-0. (#TODO not sure about this yet) ATLIS will market-buy some amount of BTC to seed the strategy
-1. Every "period", ATLIS will determine how much USDC to invest into the strategy. This increases over time as the strategy goes on. ATLIS will take the current BTC price and determine a price-band to LP for. 
-2. During the period, BTC price will fluctuate in price. If BTC price goes up, ATLIS will sell some BTC held by the strategy. Otherwise, it will buy BTC at a price below the spot price at the beginning of the period
-3. At the end of the period, ATLIS will "dock" the position out of Aqua and examine the balances. 
-    a. If BTC price is sufficiently higher than the "average entry" price for the position, a portion will be sold and the profits from the sale will be optionally transferred to a "profit", "tax" and "principle" wallet.
-    b. If BTC price is sufficiently lower than the "average entry" price for the position, more USDC will be deployed into the strategy, optionally splitting it between a spot buy and adding to the LP position.
-4. The next period begins, and ATLIS creates an LP position within a price band around the entry price (#TODO i think we need two diff LP positions for once spot and entry price diverge, because otherwise we might buy too high and sell too low).
+```shell
+$ forge test
+```
 
-# Yield sources
+### Format
 
-- Aqua incentives
-- aUSDC
+```shell
+$ forge fmt
+```
 
+### Gas Snapshots
 
-# Emergency exits
+```shell
+$ forge snapshot
+```
 
+### Anvil
 
-# Risks
+```shell
+$ anvil
+```
 
-### Emergency Withdrawal
-Emergency withdrawal needs to be able to withdraw funds quickly and unconditionally, but also must not be publicly callable. This is needed in case a bug is discovered within Aqua or within the ATLIS strategy.
+### Deploy
 
-# AI disclaimer
-As of this commit, the `StraddleVault.sol` file has been written by Claude with minimal changes from me, a human being.
+```shell
+$ forge script script/Counter.s.sol:CounterScript --rpc-url <your_rpc_url> --private-key <your_private_key>
+```
 
-As of this commit, the `specs.md` file has been written by Claude.
+### Cast
+
+```shell
+$ cast <subcommand>
+```
+
+### Help
+
+```shell
+$ forge --help
+$ anvil --help
+$ cast --help
+```
