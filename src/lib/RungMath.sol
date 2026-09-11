@@ -41,20 +41,31 @@ library RungMath {
         return _mulWad(price, DOWN);
     }
 
-    /// @notice Price of rung `n`, walked from the rung-1000 anchor.
-    /// @dev O(|n - 1000|). Callers that iterate should step from a known
-    ///      neighbour instead of calling this per rung.
-    function priceAt(uint256 anchor, uint256 n) internal pure returns (uint256 p) {
-        p = anchor;
-        if (n > BASE_RUNG) {
-            for (uint256 i = BASE_RUNG; i < n; ++i) {
+    /// @notice Price of rung `to`, walked from a known (`from`, `fromPrice`) pair.
+    /// @dev Composes the same canonical steps, so the result is identical to
+    ///      walking from the anchor provided `fromPrice == priceAt(anchor, from)`.
+    function priceFrom(uint256 from, uint256 fromPrice, uint256 to)
+        internal
+        pure
+        returns (uint256 p)
+    {
+        p = fromPrice;
+        if (to > from) {
+            for (uint256 i = from; i < to; ++i) {
                 p = stepUp(p);
             }
         } else {
-            for (uint256 i = n; i < BASE_RUNG; ++i) {
+            for (uint256 i = to; i < from; ++i) {
                 p = stepDown(p);
             }
         }
+    }
+
+    /// @notice Price of rung `n`, walked from the rung-1000 anchor.
+    /// @dev O(|n - 1000|). Callers with a nearer known rung should use
+    ///      priceFrom() instead.
+    function priceAt(uint256 anchor, uint256 n) internal pure returns (uint256) {
+        return priceFrom(BASE_RUNG, anchor, n);
     }
 
     /// @notice Highest rung whose price is <= `price`.
