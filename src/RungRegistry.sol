@@ -14,6 +14,11 @@ contract RungRegistry is Ownable {
     /// @notice rung => price (WAD). Zero means not yet cached.
     mapping(uint256 => uint256) public priceOf;
 
+    /// @notice Bounds of the cached band. INVARIANT: every rung in
+    ///         [loCached, hiCached] has a price stored in priceOf.
+    uint256 public loCached;
+    uint256 public hiCached;
+
     /// @notice rung => proxy starting at that rung.
     mapping(uint256 => address) public buyProxyAt;
     mapping(uint256 => address) public sellProxyAt;
@@ -24,6 +29,8 @@ contract RungRegistry is Ownable {
     constructor(uint256 _anchor) Ownable(msg.sender) {
         require(_anchor > 0, "anchor=0");
         anchor = _anchor;
+        loCached = RungMath.BASE_RUNG;
+        hiCached = RungMath.BASE_RUNG;
         _cache(RungMath.BASE_RUNG, _anchor);
     }
 
@@ -31,38 +38,32 @@ contract RungRegistry is Ownable {
                                 PRICES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Cached price of `rung`, computing and storing it if absent.
+    /// @notice Cached price of `rung`, extending the cached band if needed.
+    /// @dev Rungs inside [loCached, hiCached] are always present, so a miss can
+    ///      only be outside the band. Extends from the nearer edge, storing
+    ///      every rung passed to keep the band contiguous. Costs one SSTORE per
+    ///      rung extended; a distant first query is therefore expensive, while
+    ///      repeated nearby queries are one step each.
     function getPrice(uint256 rung) public returns (uint256 p) {
-        p = priceOf[rung];
-        if (p == 0) {
-            p = RungMath.priceAt(anchor, rung);
-            _cache(rung, p);
+        if (rung >= loCached && rung <= hiCached) return priceOf[rung];
+
+        if (rung > hiCached) {
+            p = priceOf[hiCached];
+            for (uint256 n = hiCached; n < rung; ) {
+                p = RungMath.stepUp(p);
+                unchecked { ++n; }
+                _cache(n, p);
+            }
+            hiCached = rung;
+        } else {
+            p = priceOf[loCached];
+            for (uint256 n = loCached; n > rung; ) {
+                p = RungMath.stepDown(p);
+                unchecked { --n; }
+                _cache(n, p);
+            }
+            loCached = rung;
         }
-    }
-
-    /// @notice Price of the rung above `rung`, stepped from its cached value.
-    /// @dev Steps only when `rung` is already cached; otherwise falls back to
-    ///      priceAt so drift never compounds from an uncached start.
-    function priceAbove(uint256 rung) external returns (uint256 p) {
-        uint256 next = rung + 1;
-        p = priceOf[next];
-        if (p != 0) return p;
-
-        uint256 cur = priceOf[rung];
-        p = cur == 0 ? RungMath.priceAt(anchor, next) : RungMath.stepUp(cur);
-        _cache(next, p);
-    }
-
-    /// @notice Price of the rung below `rung`, stepped from its cached value.
-    function priceBelow(uint256 rung) external returns (uint256 p) {
-        require(rung > 0, "rung=0");
-        uint256 prev = rung - 1;
-        p = priceOf[prev];
-        if (p != 0) return p;
-
-        uint256 cur = priceOf[rung];
-        p = cur == 0 ? RungMath.priceAt(anchor, prev) : RungMath.stepDown(cur);
-        _cache(prev, p);
     }
 
     function _cache(uint256 rung, uint256 price) private {
