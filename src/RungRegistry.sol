@@ -14,9 +14,8 @@ contract RungRegistry is Ownable {
     /// @notice rung => price (WAD). Zero means not yet cached.
     mapping(uint256 => uint256) public priceOf;
 
-    /// @notice Lowest and highest rungs ever cached. Both are always present in
-    ///         priceOf, so either is a valid starting point for a walk. The
-    ///         band between them is not necessarily fully populated.
+    /// @notice Bounds of the cached band. INVARIANT: every rung in
+    ///         [loCached, hiCached] has a price stored in priceOf.
     uint256 public loCached;
     uint256 public hiCached;
 
@@ -39,20 +38,32 @@ contract RungRegistry is Ownable {
                                 PRICES
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Cached price of `rung`, computing and storing it if absent.
-    /// @dev Walks from the nearest cached rung rather than always from the
-    ///      anchor. Only the target is stored — caching intermediates would
-    ///      cost an SSTORE per rung, far more than the steps it saves.
+    /// @notice Cached price of `rung`, extending the cached band if needed.
+    /// @dev Rungs inside [loCached, hiCached] are always present, so a miss can
+    ///      only be outside the band. Extends from the nearer edge, storing
+    ///      every rung passed to keep the band contiguous. Costs one SSTORE per
+    ///      rung extended; a distant first query is therefore expensive, while
+    ///      repeated nearby queries are one step each.
     function getPrice(uint256 rung) public returns (uint256 p) {
-        p = priceOf[rung];
-        if (p != 0) return p;
+        if (rung >= loCached && rung <= hiCached) return priceOf[rung];
 
-        uint256 from = rung > hiCached ? hiCached : (rung < loCached ? loCached : RungMath.BASE_RUNG);
-        p = RungMath.priceFrom(from, priceOf[from], rung);
-
-        if (rung > hiCached) hiCached = rung;
-        else if (rung < loCached) loCached = rung;
-        _cache(rung, p);
+        if (rung > hiCached) {
+            p = priceOf[hiCached];
+            for (uint256 n = hiCached; n < rung; ) {
+                p = RungMath.stepUp(p);
+                unchecked { ++n; }
+                _cache(n, p);
+            }
+            hiCached = rung;
+        } else {
+            p = priceOf[loCached];
+            for (uint256 n = loCached; n > rung; ) {
+                p = RungMath.stepDown(p);
+                unchecked { --n; }
+                _cache(n, p);
+            }
+            loCached = rung;
+        }
     }
 
     /// @notice Price of the rung above `rung`.
