@@ -4,9 +4,19 @@ An accumulation strategy on 1inch Aqua. Holds USDC, buys the volatile asset on
 the way down, sells above cost, sweeps realized proceeds out.
 
 Architecture is a **Manager** plus a set of **immutable child proxies**.
-Strategies are shipped once per proxy and left alive; rebalancing moves
-*capital between contracts* rather than docking and re-shipping, because
-transfers are far cheaper than ship/dock.
+
+Rebalancing prefers the cheapest operation that achieves the target:
+
+- **Growing a position** — `push` raises the declared balance in place. No
+  dock, no re-ship, one call.
+- **Closing a position** — `dock` zeroes the declared balances so the strategy
+  stops quoting, leaving nothing unfillable behind.
+
+Measured on Base: ship ~82k gas, dock ~35k, push ~57k. All are negligible in
+absolute terms; observed fee variance between transactions was driven almost
+entirely by gas price (a 341x base-fee spike), not by which operation ran. Do
+not optimise the choice of operation for gas — cap the keeper's max fee
+instead.
 
 ## 1. Rungs
 
@@ -99,7 +109,7 @@ away and goes inert. This is expected.
 
 ## 6. Rebalance loop
 
-Keeper-triggered. Strategies are **not** docked.
+Keeper-triggered.
 
 **Trigger conditions:**
 - periodic, once per configured interval, or
@@ -193,9 +203,66 @@ Splitting capital across proxies is the only way to fund rungs independently.
 - **Total deployed cap.** Every rung down requires more capital while profit
   leaves permanently. Without a hard cap this is a martingale bounded only by
   solvency.
-- **Emergency dock.** Since the normal loop never docks, an explicit
-  Manager-triggered dock across all proxies is the only way to stop quoting.
-  It cuts losses; it does not book profit or close a round trip.
-- **Stale strategies.** Proxies retain live strategies after their capital is
-  withdrawn. They quote nothing while empty, but quote again the moment any
-  asset is transferred in — intentional for reuse, hazardous if accidental.
+- **Emergency dock.** A Manager-triggered dock across all proxies stops all
+  quoting immediately. It cuts losses; it does not book profit or close a round
+  trip. Note it is terminal for those strategy bytes (Section 11).
+- **Sweep without dock.** Sweeping tokens out does not touch Aqua, so the
+  declared balance stays stale and the strategy keeps quoting depth the proxy
+  cannot honour. Fills then revert at `Aqua.pull` — no funds are lost, but the
+  position lies on the book. Always dock before retiring a proxy.
+
+## 11. Aqua balance semantics
+
+Verified against `1inch/aqua` `src/Aqua.sol` and `1inch/swap-vm`
+`contracts/instructions/XYCConcentrate.sol`.
+
+### The declared balance drives the curve
+
+`ship` stores exactly the amounts declared, with no reference to the maker's
+wallet: `balance.store(amounts[i].toUint248(), tokensCount)`. The router reads
+that value into the VM context (`SwapVM.sol:163`, via `AQUA.safeBalances`), and
+`XYCConcentrateSwap.exec` derives `liquidity` from it.
+
+So the declared amount is not a cap — it sets the depth of the curve. Declaring
+more than the proxy holds makes it quote as though it were deeper, at prices it
+cannot honour; the failure surfaces later as a revert in `Aqua.pull`.
+
+**Rule: the declared balance must always equal the proxy's real balance.**
+
+### What can change a declared balance
+
+| Operation | Effect | Caller |
+|---|---|---|
+| `ship` | sets the initial amounts | maker |
+| `push` | **increases** by `amount` | anyone |
+| `pull` | decreases | the app only |
+| `dock` | zeroes, marks docked | maker |
+
+There is no maker-callable decrement. Reducing a position requires `dock`.
+
+### push is unpermissioned
+
+`push` checks only that the strategy is active — not that `msg.sender` is the
+maker. This is required: it is the path the router uses to deliver a taker's
+input tokens. Credit and transfer are the same number in the same call, so a
+third party pushing to our strategy donates real tokens and cannot steal.
+
+Two consequences:
+
+- **Self-push.** When maker and `msg.sender` are the same contract, the
+  transfer is a self-transfer moving nothing while the declared balance rises.
+  This is how `LadderProxy.topUp` works.
+- **Donations corrupt net-delta accounting.** An unsolicited push increases a
+  proxy's balance with no offsetting movement, which Section 8's collapse reads
+  as free acquisition and which drags `avgEntry` down. To book donations
+  separately the Manager must read `Pushed` events and attribute by sender.
+
+### Docking is terminal for the strategy bytes
+
+`dock` sets `tokensCount` to `_DOCKED` (0xff). `ship` requires
+`tokensCount == 0`. Nothing resets it. Since
+`strategyHash = keccak256(strategy)` — the program bytes alone, with no maker
+or nonce mixed in — **the same program can never be re-shipped by that maker.**
+
+Re-shipping the same rung range therefore requires different bytes. Vary the
+`Salt` instruction in the program to produce a distinct hash.
