@@ -66,17 +66,6 @@ contract RungRegistry is Ownable {
         }
     }
 
-    /// @notice Price of the rung above `rung`.
-    function priceAbove(uint256 rung) external returns (uint256) {
-        return getPrice(rung + 1);
-    }
-
-    /// @notice Price of the rung below `rung`.
-    function priceBelow(uint256 rung) external returns (uint256) {
-        require(rung > 0, "rung=0");
-        return getPrice(rung - 1);
-    }
-
     function _cache(uint256 rung, uint256 price) private {
         priceOf[rung] = price;
         emit PriceCached(rung, price);
