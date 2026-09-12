@@ -6,6 +6,7 @@ import {IERC20} from "@openzeppelin/contracts/token/ERC20/IERC20.sol";
 import {ERC20} from "@openzeppelin/contracts/token/ERC20/ERC20.sol";
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {LadderProxy} from "../src/LadderProxy.sol";
+import {SaltLib} from "../src/lib/SaltLib.sol";
 import {IAqua} from "../src/interfaces/IAqua.sol";
 import {RungMath} from "../src/lib/RungMath.sol";
 import {AquaPriceMath} from "../src/lib/AquaPriceMath.sol";
@@ -764,5 +765,150 @@ contract LadderProxyTest is Test {
         vm.stopPrank();
 
         assertEq(sellProxy.strategyHash(), bytes32(0));
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                          SALT ON SHIP
+    //////////////////////////////////////////////////////////////*/
+
+    function test_salt_derivedOnShip() public {
+        assertEq(proxy.currentSalt(), 0);
+
+        vm.prank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+
+        assertTrue(proxy.currentSalt() != 0);
+    }
+
+    function test_nonce_startsAtZero() public view {
+        assertEq(proxy.nonce(), 0);
+    }
+
+    function test_nonce_advancesOnShip() public {
+        vm.prank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+        assertEq(proxy.nonce(), 1);
+    }
+
+    /// @dev Each proxy owns its own counter; one proxy shipping must not move
+    ///      another's.
+    function test_nonce_isPerProxy() public {
+        vm.prank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+
+        assertEq(proxy.nonce(), 1);
+        assertEq(sellProxy.nonce(), 0);
+    }
+
+    /// @dev Nothing external can advance the counter — there is no setter, and
+    ///      it moves only inside shipStrategy.
+    function test_nonce_onlyMovesOnShip() public {
+        usdc.mint(address(proxy), 1000e6);
+        vm.startPrank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+        proxy.topUp(address(usdc), 1);
+        proxy.dockStrategy();
+        vm.stopPrank();
+
+        assertEq(proxy.nonce(), 1);
+    }
+
+    function test_nonce_monotonicAcrossReships() public {
+        bytes memory b2 = hex"211426ffc7d378e8e49be2c483295a3e3e511f96a4682c";
+        bytes memory b3 = hex"211426ffc7d378e8e49be2c483295a3e3e511f96a4683c";
+
+        vm.startPrank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+        proxy.dockStrategy();
+        proxy.shipStrategy(app, b2, LOW, HIGH, 1000e6);
+        proxy.dockStrategy();
+        proxy.shipStrategy(app, b3, LOW, HIGH, 1000e6);
+        vm.stopPrank();
+
+        assertEq(proxy.nonce(), 3);
+    }
+
+    /// @dev Two proxies shipping in the same block at the SAME nonce must
+    ///      still get different salts — the proxy address in the domain is
+    ///      what separates them.
+    function test_salt_differsAcrossProxiesSameBlock() public {
+        vm.startPrank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+        sellProxy.shipStrategy(app, STRATEGY, LOW, HIGH, 2e18);
+        vm.stopPrank();
+
+        assertEq(proxy.nonce(), 1);
+        assertEq(sellProxy.nonce(), 1);
+        assertTrue(proxy.currentSalt() != sellProxy.currentSalt());
+    }
+
+    /// @dev Re-shipping after a dock must produce a different salt, since the
+    ///      old program bytes are permanently dead.
+    function test_salt_changesOnReship() public {
+        vm.startPrank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+        uint64 first = proxy.currentSalt();
+
+        proxy.dockStrategy();
+
+        bytes memory other = hex"211426ffc7d378e8e49be2c483295a3e3e511f96a4682c";
+        proxy.shipStrategy(app, other, LOW, HIGH, 1000e6);
+        vm.stopPrank();
+
+        assertTrue(proxy.currentSalt() != first);
+    }
+
+    function test_salt_matchesLibrary() public {
+        vm.prank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+
+        assertEq(proxy.currentSalt(), SaltLib.compute(address(proxy), 1));
+    }
+
+    /// @dev nextSalt must predict the next ship without advancing the counter.
+    function test_nextSalt_predictsAndDoesNotAdvance() public {
+        uint64 predicted = proxy.nextSalt();
+        assertEq(proxy.nonce(), 0);
+
+        vm.prank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+
+        assertEq(proxy.currentSalt(), predicted);
+    }
+
+    /// @dev Salt no longer depends on block.timestamp: warping time must not
+    ///      change the derived value for the same nonce.
+    function test_salt_independentOfTimestamp() public {
+        uint64 before = proxy.nextSalt();
+        vm.warp(block.timestamp + 30 days);
+        assertEq(proxy.nextSalt(), before);
+    }
+
+    function test_salt_emitsEvent() public {
+        vm.expectEmit(false, false, false, true);
+        emit LadderProxy.SaltDerived(proxy.nextSalt(), 1);
+        vm.prank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+    }
+
+    function testFuzz_salt_distinctNonces(uint64 a, uint64 b) public view {
+        vm.assume(a != b);
+        assertTrue(
+            SaltLib.compute(address(proxy), a) != SaltLib.compute(address(proxy), b)
+        );
+    }
+
+    function test_salt_variesByChainId() public pure {
+        assertTrue(
+            SaltLib.computeWithChainId(1, address(0xA1), 1)
+                != SaltLib.computeWithChainId(8453, address(0xA1), 1)
+        );
+    }
+
+    function test_salt_chainIdVariantsAgree() public view {
+        assertEq(
+            SaltLib.compute(address(proxy), 1),
+            SaltLib.computeWithChainId(block.chainid, address(proxy), 1)
+        );
     }
 }

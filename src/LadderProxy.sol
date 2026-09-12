@@ -6,6 +6,7 @@ import {SafeERC20} from "@openzeppelin/contracts/token/ERC20/utils/SafeERC20.sol
 import {Ownable} from "@openzeppelin/contracts/access/Ownable.sol";
 import {IAqua} from "./interfaces/IAqua.sol";
 import {RungMath} from "./lib/RungMath.sol";
+import {SaltLib} from "./lib/SaltLib.sol";
 import {AquaPriceMath} from "./lib/AquaPriceMath.sol";
 
 /// @title LadderProxy
@@ -49,9 +50,20 @@ contract LadderProxy is Ownable {
     uint256 public sqrtPriceLow;
     uint256 public sqrtPriceHigh;
 
+    /// @notice Proxy-local strategy counter. Monotonic, never reused, and
+    ///         incremented only by this contract — nothing external can
+    ///         advance or reset it. Supplies the uniqueness component of the
+    ///         salt, so `(proxy, nonce)` is unique across all time.
+    uint256 public nonce;
+
+    /// @notice Salt used by the live strategy. Recorded so the exact program
+    ///         bytes can be reconstructed off-chain for verification.
+    uint64 public currentSalt;
+
     event Shipped(address indexed app, bytes32 indexed strategyHash, uint256 usdcAmount, uint256 wethAmount);
     event Bounds(uint256 lowRung, uint256 highRung, uint256 sqrtPriceLow, uint256 sqrtPriceHigh);
     event Docked(address indexed app, bytes32 indexed strategyHash);
+    event SaltDerived(uint64 salt, uint256 nonce);
     event ToppedUp(address indexed token, uint256 amount, uint256 newDeclaredBalance);
 
     error AlreadyShipped();
@@ -118,10 +130,22 @@ contract LadderProxy is Ownable {
         if (amount == 0) revert NoLiquidity();
         if (_lowRung >= _highRung) revert BadRungOrder();
 
-        // Single-sided allocation: seed token gets `amount`, the other zero.
-        (uint256 usdcAmount, uint256 wethAmount) =
-            isBuySide ? (amount, uint256(0)) : (uint256(0), amount);
+        _recordBounds(_lowRung, _highRung);
+        _deriveSalt();
 
+        bytes32 h = aqua.ship(_app, strategy, _tokens(), _amounts(amount));
+
+        app = _app;
+        strategyHash = h;
+
+        emit Shipped(
+            _app, h, isBuySide ? amount : 0, isBuySide ? 0 : amount
+        );
+        return h;
+    }
+
+    /// @dev Records rung bounds and their sqrt-price encodings.
+    function _recordBounds(uint256 _lowRung, uint256 _highRung) private {
         uint256 sLow = sqrtPriceOf(_lowRung);
         uint256 sHigh = sqrtPriceOf(_highRung);
 
@@ -129,22 +153,42 @@ contract LadderProxy is Ownable {
         highRung = _highRung;
         sqrtPriceLow = sLow;
         sqrtPriceHigh = sHigh;
-        emit Bounds(_lowRung, _highRung, sLow, sHigh);
 
-        address[] memory tokens = new address[](2);
-        uint256[] memory amounts = new uint256[](2);
+        emit Bounds(_lowRung, _highRung, sLow, sHigh);
+    }
+
+    /// @dev Advances the proxy-local nonce and derives this ship's salt.
+    ///      Docking is terminal for a given set of program bytes, so every ship
+    ///      must produce a distinct hash or this rung range could never be
+    ///      re-shipped by this proxy.
+    function _deriveSalt() private {
+        uint256 n;
+        unchecked {
+            n = ++nonce;
+        }
+        uint64 s = SaltLib.compute(address(this), n);
+        currentSalt = s;
+        emit SaltDerived(s, n);
+    }
+
+    /// @notice The salt the next ship will use. View-only; does not advance.
+    function nextSalt() external view returns (uint64) {
+        return SaltLib.compute(address(this), nonce + 1);
+    }
+
+    /// @dev Both tokens are always registered, even though only the seed token
+    ///      carries a nonzero amount — `dock` requires the full token set.
+    function _tokens() private view returns (address[] memory tokens) {
+        tokens = new address[](2);
         tokens[0] = address(usdc);
         tokens[1] = address(weth);
-        amounts[0] = usdcAmount;
-        amounts[1] = wethAmount;
+    }
 
-        bytes32 h = aqua.ship(_app, strategy, tokens, amounts);
-
-        app = _app;
-        strategyHash = h;
-
-        emit Shipped(_app, h, usdcAmount, wethAmount);
-        return h;
+    /// @dev Single-sided allocation: seed token gets `amount`, the other zero.
+    function _amounts(uint256 amount) private view returns (uint256[] memory amounts) {
+        amounts = new uint256[](2);
+        if (isBuySide) amounts[0] = amount;
+        else amounts[1] = amount;
     }
 
     /*//////////////////////////////////////////////////////////////
