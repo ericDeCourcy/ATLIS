@@ -109,7 +109,8 @@ away and goes inert. This is expected.
 
 ## 6. Rebalance loop
 
-Keeper-triggered.
+Keeper-triggered. Distinct from a **harvest** (Section 12), which is a lighter
+operation the keeper may run at any time between rebalances.
 
 **Trigger conditions:**
 - periodic, once per configured interval, or
@@ -208,8 +209,9 @@ Splitting capital across proxies is the only way to fund rungs independently.
   trip. Note it is terminal for those strategy bytes (Section 11).
 - **Sweep without dock.** Sweeping tokens out does not touch Aqua, so the
   declared balance stays stale and the strategy keeps quoting depth the proxy
-  cannot honour. Fills then revert at `Aqua.pull` — no funds are lost, but the
-  position lies on the book. Always dock before retiring a proxy.
+  cannot honour. Fills then revert at `Aqua.pull`. This is accepted by design
+  for harvests (Section 12); it is only a hazard when a proxy is being retired,
+  so **dock before retiring**.
 
 ## 11. Aqua balance semantics
 
@@ -266,3 +268,74 @@ or nonce mixed in — **the same program can never be re-shipped by that maker.*
 
 Re-shipping the same rung range therefore requires different bytes. Vary the
 `Salt` instruction in the program to produce a distinct hash.
+
+## 12. Harvesting partial fills
+
+Ranged liquidity fills continuously, so a proxy accumulates the opposite token
+long before its band is fully traversed. Waiting for a full rebalance to
+collect that is unnecessary. **Harvesting is expected, routine behaviour**: at
+any point, a keeper that detects a partial fill may poke the proxy and pull out
+what it has acquired.
+
+### Definition
+
+A harvest transfers out the **acquired** token only:
+
+| Proxy | Seed token (stays) | Acquired token (harvested) |
+|---|---|---|
+| Buy | USDC | WETH |
+| Sell | WETH | USDC |
+
+A harvest does exactly two things:
+
+1. Transfer the acquired token out of the proxy to the Manager.
+2. The Manager records the price paid for it.
+
+It does **not** dock, does **not** re-ship, and does **not** top up. Top-ups
+(Section 11) are a separate operation on their own schedule.
+
+### Why no dock
+
+Docking would be correct but unnecessary. The position is left quoting a
+declared balance it can no longer honour on the harvested side, and any fill
+that demands that token reverts at `Aqua.pull`. That is accepted: resolvers
+simulate before routing, so a quote that cannot fill is simply not selected.
+The seed side is unaffected and continues to fill normally.
+
+Note the on-chain partial-fill clamp in `XYCConcentrateSwap.exec`
+(`if (amountOut > balanceOut) amountOut = balanceOut`) clamps against the
+**declared** balance, not the real one — so it does not protect here. The
+protection is off-chain simulation, not the contract.
+
+### Pricing is unaffected
+
+The curve is computed solely from Aqua's declared balances
+(`SwapVM.sol:163`, via `safeBalances`). A plain ERC-20 transfer out does not
+touch them. A harvested proxy therefore quotes **exactly the same prices** as
+an unharvested one — harvesting changes what can be delivered, never what is
+quoted.
+
+### Computing the price paid
+
+Declared balances track fills automatically: each swap calls `pull` on the
+outgoing token (`prevBalance - amount`) and `push` on the incoming one
+(`prevBalance + amount`). No event parsing is required.
+
+For a buy proxy, between ship and harvest:
+
+```
+usdcSpent   = declaredUsdcAtShip - declaredUsdcNow
+wethAcquired = real WETH balance being harvested
+pricePaid   = usdcSpent / wethAcquired
+```
+
+The Manager folds `usdcSpent` and `wethAcquired` into `costBasisUsdc` and
+`inventoryBtc` exactly as in Section 8. Sell-side harvests are the mirror and
+are booked as disposals.
+
+**Caveat:** this arithmetic is only valid if nothing other than fills moved the
+declared balance since the last observation. A `topUp` raises declared USDC
+without a fill, and an unsolicited third-party `push` (Section 11) raises a
+declared balance with no offsetting movement. The Manager must snapshot
+declared balances immediately after any top-up, and treat a declared increase
+on the seed side that it did not itself cause as a donation rather than a fill.
