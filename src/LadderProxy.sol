@@ -26,6 +26,15 @@ contract LadderProxy is Ownable {
     /// @notice Price of rung 1000, WAD. Anchors the ladder for this proxy.
     uint256 public immutable anchor;
 
+    /// @notice Which side this proxy is. Fixed at construction.
+    ///         BUY  -> seeded with USDC, rungs sit below the ladder anchor
+    ///         SELL -> seeded with WETH, rungs sit above it
+    /// @dev This constrains only what can be PUT IN. Positions are ranged
+    ///      liquidity and quote both directions, so a buy proxy will come to
+    ///      hold WETH as price moves through its band. That is expected, and
+    ///      sweep() removes both tokens.
+    bool public immutable isBuySide;
+
     /// @notice Hash of the live strategy. Zero when nothing is shipped.
     bytes32 public strategyHash;
 
@@ -52,17 +61,24 @@ contract LadderProxy is Ownable {
     error BadRungOrder();
     error ZeroAnchor();
     error UnknownToken();
+    error WrongSide();
     error ZeroAmount();
 
-    constructor(address _aqua, address _usdc, address _weth, uint256 _anchor, address _owner)
-        Ownable(_owner)
-    {
+    constructor(
+        address _aqua,
+        address _usdc,
+        address _weth,
+        uint256 _anchor,
+        bool _isBuySide,
+        address _owner
+    ) Ownable(_owner) {
         if (_aqua == address(0) || _usdc == address(0) || _weth == address(0)) {
             revert ZeroAddress();
         }
         if (_anchor == 0) revert ZeroAnchor();
 
         anchor = _anchor;
+        isBuySide = _isBuySide;
         aqua = IAqua(_aqua);
         usdc = IERC20(_usdc);
         weth = IERC20(_weth);
@@ -79,10 +95,12 @@ contract LadderProxy is Ownable {
     /// @param strategy Pre-encoded SwapVM program covering the rung range.
     /// @param _lowRung Lower rung bound, inclusive.
     /// @param _highRung Upper rung bound, inclusive. Must exceed `_lowRung`.
-    /// @param usdcAmount Virtual USDC liquidity to allocate. May be zero.
-    /// @param wethAmount Virtual WETH liquidity to allocate. May be zero.
-    /// @dev Allocating more than the contract holds is permitted by Aqua; such
-    ///      a strategy simply reverts on fill rather than failing here.
+    /// @param amount Virtual liquidity of the SEED token to allocate. The
+    ///        opposite token is always allocated zero — a proxy is single-sided
+    ///        on the way in, even though fills may leave it holding both.
+    /// @dev The declared amount sets the DEPTH OF THE CURVE, not a cap
+    ///      (XYCConcentrateSwap derives liquidity from it). Ship exactly what
+    ///      the proxy holds, or it quotes prices its inventory cannot honour.
     ///
     ///      The sqrt prices are derived here and recorded, but are NOT spliced
     ///      into `strategy` — the caller is responsible for encoding bounds
@@ -93,13 +111,16 @@ contract LadderProxy is Ownable {
         bytes calldata strategy,
         uint256 _lowRung,
         uint256 _highRung,
-        uint256 usdcAmount,
-        uint256 wethAmount
+        uint256 amount
     ) external onlyOwner returns (bytes32) {
         if (strategyHash != bytes32(0)) revert AlreadyShipped();
         if (_app == address(0)) revert ZeroAddress();
-        if (usdcAmount == 0 && wethAmount == 0) revert NoLiquidity();
+        if (amount == 0) revert NoLiquidity();
         if (_lowRung >= _highRung) revert BadRungOrder();
+
+        // Single-sided allocation: seed token gets `amount`, the other zero.
+        (uint256 usdcAmount, uint256 wethAmount) =
+            isBuySide ? (amount, uint256(0)) : (uint256(0), amount);
 
         uint256 sLow = sqrtPriceOf(_lowRung);
         uint256 sHigh = sqrtPriceOf(_highRung);
@@ -179,6 +200,9 @@ contract LadderProxy is Ownable {
     function topUp(address token, uint256 amount) external onlyOwner {
         if (strategyHash == bytes32(0)) revert NothingShipped();
         if (token != address(usdc) && token != address(weth)) revert UnknownToken();
+        // Only the seed token may be added. Tokens acquired through fills are
+        // swept out at rebalance, never topped up into the declared balance.
+        if (token != address(seedToken())) revert WrongSide();
         if (amount == 0) revert ZeroAmount();
 
         aqua.push(address(this), app, strategyHash, token, amount);
@@ -210,6 +234,11 @@ contract LadderProxy is Ownable {
 
         if (u != 0) usdc.safeTransfer(to, u);
         if (w != 0) weth.safeTransfer(to, w);
+    }
+
+    /// @notice The only token that may be allocated or topped up here.
+    function seedToken() public view returns (IERC20) {
+        return isBuySide ? usdc : weth;
     }
 
     /// @notice Aqua sqrt-price encoding of a rung, via the ladder anchor.

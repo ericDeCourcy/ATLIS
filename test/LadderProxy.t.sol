@@ -110,7 +110,8 @@ contract LadderProxyTest is Test {
     MockAqua aqua;
     MockToken usdc;
     MockToken weth;
-    LadderProxy proxy;
+    LadderProxy proxy;      // buy side, seeded with USDC
+    LadderProxy sellProxy;  // sell side, seeded with WETH
 
     address manager = address(0xA4);
     address stranger = address(0xBEEF);
@@ -127,7 +128,8 @@ contract LadderProxyTest is Test {
         aqua = new MockAqua();
         usdc = new MockToken("USD Coin", "USDC", 6);
         weth = new MockToken("Wrapped Ether", "WETH", 18);
-        proxy = new LadderProxy(address(aqua), address(usdc), address(weth), ANCHOR, manager);
+        proxy = new LadderProxy(address(aqua), address(usdc), address(weth), ANCHOR, true, manager);
+        sellProxy = new LadderProxy(address(aqua), address(usdc), address(weth), ANCHOR, false, manager);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -152,12 +154,12 @@ contract LadderProxyTest is Test {
 
     function test_constructorRevertsOnZeroAqua() public {
         vm.expectRevert(LadderProxy.ZeroAddress.selector);
-        new LadderProxy(address(0), address(usdc), address(weth), ANCHOR, manager);
+        new LadderProxy(address(0), address(usdc), address(weth), ANCHOR, true, manager);
     }
 
     function test_constructorRevertsOnZeroToken() public {
         vm.expectRevert(LadderProxy.ZeroAddress.selector);
-        new LadderProxy(address(aqua), address(0), address(weth), ANCHOR, manager);
+        new LadderProxy(address(aqua), address(0), address(weth), ANCHOR, true, manager);
     }
 
     function test_nothingShippedInitially() public view {
@@ -171,28 +173,29 @@ contract LadderProxyTest is Test {
 
     function test_shipStrategy_storesHashAndApp() public {
         vm.prank(manager);
-        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
 
         assertEq(proxy.strategyHash(), h);
         assertEq(proxy.app(), app);
         assertTrue(h != bytes32(0));
     }
 
-    /// @dev Aqua must receive both tokens as parallel arrays, USDC first.
+    /// @dev Both tokens are always registered with Aqua as parallel arrays,
+    ///      USDC first — but only the seed token gets a nonzero amount.
     function test_shipStrategy_forwardsParallelArrays() public {
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 2e18);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
 
         assertEq(aqua.tokensLength(), 2);
         assertEq(aqua.lastTokens(0), address(usdc));
         assertEq(aqua.lastTokens(1), address(weth));
         assertEq(aqua.lastAmounts(0), 1000e6);
-        assertEq(aqua.lastAmounts(1), 2e18);
+        assertEq(aqua.lastAmounts(1), 0);
     }
 
     function test_shipStrategy_forwardsStrategyBytesVerbatim() public {
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
 
         assertEq(aqua.lastStrategy(), STRATEGY);
         assertEq(aqua.lastApp(), app);
@@ -200,22 +203,24 @@ contract LadderProxyTest is Test {
 
     function test_shipStrategy_emitsEvent() public {
         vm.expectEmit(true, false, false, true);
-        emit LadderProxy.Shipped(app, bytes32(0), 1000e6, 2e18);
+        emit LadderProxy.Shipped(app, bytes32(0), 1000e6, 0);
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 2e18);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
     }
 
     /// @dev Single-sided allocation is the normal case for a seeded proxy.
     function test_shipStrategy_singleSidedUsdc() public {
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         assertEq(aqua.lastAmounts(1), 0);
     }
 
-    function test_shipStrategy_singleSidedWeth() public {
+    /// @dev A sell proxy allocates WETH and zero USDC — the mirror case.
+    function test_shipStrategy_sellSideAllocatesWeth() public {
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 0, 2e18);
+        sellProxy.shipStrategy(app, STRATEGY, LOW, HIGH, 2e18);
         assertEq(aqua.lastAmounts(0), 0);
+        assertEq(aqua.lastAmounts(1), 2e18);
     }
 
     /// @dev Aqua does not check balances at ship time, so allocating more than
@@ -223,28 +228,28 @@ contract LadderProxyTest is Test {
     function test_shipStrategy_allowsOverAllocation() public {
         assertEq(usdc.balanceOf(address(proxy)), 0);
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1_000_000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1_000_000e6);
         assertEq(aqua.shipCount(), 1);
     }
 
     function test_shipStrategy_revertsIfAlreadyShipped() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         vm.expectRevert(LadderProxy.AlreadyShipped.selector);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         vm.stopPrank();
     }
 
     function test_shipStrategy_revertsOnZeroApp() public {
         vm.prank(manager);
         vm.expectRevert(LadderProxy.ZeroAddress.selector);
-        proxy.shipStrategy(address(0), STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(address(0), STRATEGY, LOW, HIGH, 1000e6);
     }
 
     function test_shipStrategy_revertsOnNoLiquidity() public {
         vm.prank(manager);
         vm.expectRevert(LadderProxy.NoLiquidity.selector);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 0, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 0);
     }
 
     function test_shipStrategy_onlyOwner() public {
@@ -252,7 +257,7 @@ contract LadderProxyTest is Test {
         vm.expectRevert(
             abi.encodeWithSelector(Ownable.OwnableUnauthorizedAccount.selector, stranger)
         );
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -293,7 +298,7 @@ contract LadderProxyTest is Test {
     function test_sweep_leavesStrategyLive() public {
         usdc.mint(address(proxy), 500e6);
         vm.startPrank(manager);
-        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 500e6, 0);
+        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 500e6);
         proxy.sweep(manager);
         vm.stopPrank();
 
@@ -305,7 +310,7 @@ contract LadderProxyTest is Test {
     function test_sweep_thenRefund() public {
         usdc.mint(address(proxy), 500e6);
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 500e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 500e6);
         proxy.sweep(manager);
         vm.stopPrank();
 
@@ -363,7 +368,7 @@ contract LadderProxyTest is Test {
 
     function test_constructorRevertsOnZeroAnchor() public {
         vm.expectRevert(LadderProxy.ZeroAnchor.selector);
-        new LadderProxy(address(aqua), address(usdc), address(weth), 0, manager);
+        new LadderProxy(address(aqua), address(usdc), address(weth), 0, true, manager);
     }
 
     /// @dev Anchor rung encodes to the known 3000 USDC/WETH sqrt price.
@@ -388,7 +393,7 @@ contract LadderProxyTest is Test {
 
     function test_shipStrategy_storesRungsAndPrices() public {
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
 
         assertEq(proxy.lowRung(), LOW);
         assertEq(proxy.highRung(), HIGH);
@@ -404,19 +409,19 @@ contract LadderProxyTest is Test {
         vm.expectEmit(false, false, false, true);
         emit LadderProxy.Bounds(LOW, HIGH, sLow, sHigh);
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
     }
 
     function test_shipStrategy_revertsOnInvertedRungs() public {
         vm.prank(manager);
         vm.expectRevert(LadderProxy.BadRungOrder.selector);
-        proxy.shipStrategy(app, STRATEGY, HIGH, LOW, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, HIGH, LOW, 1000e6);
     }
 
     function test_shipStrategy_revertsOnEqualRungs() public {
         vm.prank(manager);
         vm.expectRevert(LadderProxy.BadRungOrder.selector);
-        proxy.shipStrategy(app, STRATEGY, BASE, BASE, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, BASE, BASE, 1000e6);
     }
 
     /// @dev A 6-rung band spans ~14% in price terms (0.975^6).
@@ -437,7 +442,7 @@ contract LadderProxyTest is Test {
 
     function test_dock_clearsState() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.dockStrategy();
         vm.stopPrank();
 
@@ -449,7 +454,7 @@ contract LadderProxyTest is Test {
     /// @dev Docking must zero the declared balance so the position stops quoting.
     function test_dock_zeroesDeclaredBalance() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         (uint256 uBefore,) = proxy.declaredBalances();
         assertEq(uBefore, 1000e6);
 
@@ -463,7 +468,7 @@ contract LadderProxyTest is Test {
 
     function test_dock_emitsEvent() public {
         vm.startPrank(manager);
-        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
 
         vm.expectEmit(true, true, false, false);
         emit LadderProxy.Docked(app, h);
@@ -479,7 +484,7 @@ contract LadderProxyTest is Test {
 
     function test_dock_revertsIfAlreadyDocked() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.dockStrategy();
         vm.expectRevert(LadderProxy.NothingShipped.selector);
         proxy.dockStrategy();
@@ -488,7 +493,7 @@ contract LadderProxyTest is Test {
 
     function test_dock_onlyOwner() public {
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
 
         vm.prank(stranger);
         vm.expectRevert(
@@ -501,11 +506,11 @@ contract LadderProxyTest is Test {
     ///      _DOCKED and ship() only accepts 0. Re-shipping needs a new salt.
     function test_dock_sameBytesCannotBeReshipped() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.dockStrategy();
 
         vm.expectRevert(MockAqua.StrategiesMustBeImmutable.selector);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         vm.stopPrank();
     }
 
@@ -514,9 +519,9 @@ contract LadderProxyTest is Test {
         bytes memory other = hex"211426ffc7d378e8e49be2c483295a3e3e511f96a4682c";
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.dockStrategy();
-        bytes32 h2 = proxy.shipStrategy(app, other, LOW, HIGH, 1000e6, 0);
+        bytes32 h2 = proxy.shipStrategy(app, other, LOW, HIGH, 1000e6);
         vm.stopPrank();
 
         assertEq(proxy.strategyHash(), h2);
@@ -532,7 +537,7 @@ contract LadderProxyTest is Test {
         usdc.mint(address(proxy), 1500e6);
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.topUp(address(usdc), 500e6);
         vm.stopPrank();
 
@@ -544,7 +549,7 @@ contract LadderProxyTest is Test {
         usdc.mint(address(proxy), 1500e6);
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.topUp(address(usdc), 500e6);
         vm.stopPrank();
 
@@ -552,15 +557,15 @@ contract LadderProxyTest is Test {
         assertEq(real, 1500e6);
     }
 
-    function test_topUp_weth() public {
-        weth.mint(address(proxy), 5e18);
+    function test_topUp_sellSideWeth() public {
+        weth.mint(address(sellProxy), 5e18);
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 0, 2e18);
-        proxy.topUp(address(weth), 3e18);
+        sellProxy.shipStrategy(app, STRATEGY, LOW, HIGH, 2e18);
+        sellProxy.topUp(address(weth), 3e18);
         vm.stopPrank();
 
-        (, uint256 declared) = proxy.declaredBalances();
+        (, uint256 declared) = sellProxy.declaredBalances();
         assertEq(declared, 5e18);
     }
 
@@ -568,7 +573,7 @@ contract LadderProxyTest is Test {
         usdc.mint(address(proxy), 3000e6);
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.topUp(address(usdc), 500e6);
         proxy.topUp(address(usdc), 500e6);
         vm.stopPrank();
@@ -588,7 +593,7 @@ contract LadderProxyTest is Test {
     ///      catches it first since dockStrategy clears strategyHash.
     function test_topUp_revertsAfterDock() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.dockStrategy();
         vm.expectRevert(LadderProxy.NothingShipped.selector);
         proxy.topUp(address(usdc), 500e6);
@@ -597,7 +602,7 @@ contract LadderProxyTest is Test {
 
     function test_topUp_revertsOnUnknownToken() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         vm.expectRevert(LadderProxy.UnknownToken.selector);
         proxy.topUp(address(0xDEAD), 500e6);
         vm.stopPrank();
@@ -605,7 +610,7 @@ contract LadderProxyTest is Test {
 
     function test_topUp_revertsOnZeroAmount() public {
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         vm.expectRevert(LadderProxy.ZeroAmount.selector);
         proxy.topUp(address(usdc), 0);
         vm.stopPrank();
@@ -613,7 +618,7 @@ contract LadderProxyTest is Test {
 
     function test_topUp_onlyOwner() public {
         vm.prank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
 
         vm.prank(stranger);
         vm.expectRevert(
@@ -628,7 +633,7 @@ contract LadderProxyTest is Test {
         usdc.mint(address(proxy), 2000e6);
 
         vm.startPrank(manager);
-        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        bytes32 h = proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.topUp(address(usdc), 1000e6);
         vm.stopPrank();
 
@@ -642,7 +647,7 @@ contract LadderProxyTest is Test {
         usdc.mint(address(proxy), uint256(initial) + uint256(extra));
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, initial, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, initial);
         proxy.topUp(address(usdc), extra);
         vm.stopPrank();
 
@@ -666,7 +671,7 @@ contract LadderProxyTest is Test {
         usdc.mint(address(proxy), 1000e6);
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.sweep(manager);
         vm.stopPrank();
 
@@ -682,7 +687,7 @@ contract LadderProxyTest is Test {
         usdc.mint(address(proxy), 1000e6);
 
         vm.startPrank(manager);
-        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6, 0);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
         proxy.dockStrategy();
         proxy.sweep(manager);
         vm.stopPrank();
@@ -692,5 +697,72 @@ contract LadderProxyTest is Test {
 
         assertEq(real, 0);
         assertEq(declared, 0);
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                            SIDE CONSTRAINT
+    //////////////////////////////////////////////////////////////*/
+
+    function test_side_buyProxySeedsUsdc() public view {
+        assertTrue(proxy.isBuySide());
+        assertEq(address(proxy.seedToken()), address(usdc));
+    }
+
+    function test_side_sellProxySeedsWeth() public view {
+        assertFalse(sellProxy.isBuySide());
+        assertEq(address(sellProxy.seedToken()), address(weth));
+    }
+
+    /// @dev A buy proxy may never have WETH added to its declared balance.
+    function test_side_buyProxyRejectsWethTopUp() public {
+        vm.startPrank(manager);
+        proxy.shipStrategy(app, STRATEGY, LOW, HIGH, 1000e6);
+        vm.expectRevert(LadderProxy.WrongSide.selector);
+        proxy.topUp(address(weth), 1e18);
+        vm.stopPrank();
+    }
+
+    function test_side_sellProxyRejectsUsdcTopUp() public {
+        vm.startPrank(manager);
+        sellProxy.shipStrategy(app, STRATEGY, LOW, HIGH, 2e18);
+        vm.expectRevert(LadderProxy.WrongSide.selector);
+        sellProxy.topUp(address(usdc), 1000e6);
+        vm.stopPrank();
+    }
+
+    /// @dev Ranged liquidity fills both ways, so a buy proxy WILL come to hold
+    ///      WETH. The side constraint governs what goes IN, not what it ends
+    ///      up holding — and sweep must still remove both.
+    function test_side_buyProxyCanHoldBothAndSweepBoth() public {
+        usdc.mint(address(proxy), 1000e6);
+        weth.mint(address(proxy), 2e18); // as if acquired through a fill
+
+        vm.prank(manager);
+        proxy.sweep(manager);
+
+        assertEq(usdc.balanceOf(manager), 1000e6);
+        assertEq(weth.balanceOf(manager), 2e18);
+    }
+
+    function test_side_sellProxyCanHoldBothAndSweepBoth() public {
+        weth.mint(address(sellProxy), 2e18);
+        usdc.mint(address(sellProxy), 1000e6); // acquired through a fill
+
+        vm.prank(manager);
+        sellProxy.sweep(manager);
+
+        assertEq(weth.balanceOf(manager), 2e18);
+        assertEq(usdc.balanceOf(manager), 1000e6);
+    }
+
+    /// @dev Both tokens are always registered with Aqua, so dock (which
+    ///      requires tokensCount == tokens.length) still works on both sides.
+    function test_side_sellProxyDocks() public {
+        vm.startPrank(manager);
+        sellProxy.shipStrategy(app, STRATEGY, LOW, HIGH, 2e18);
+        sellProxy.dockStrategy();
+        vm.stopPrank();
+
+        assertEq(sellProxy.strategyHash(), bytes32(0));
     }
 }
