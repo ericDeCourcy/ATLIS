@@ -1,0 +1,91 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <meta name="description" content="WETH / USDC liquidity strategy dashboard" />
+  <title>Range Pilot · WETH / USDC</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.googleapis.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=DM+Mono:wght@400;500&family=Manrope:wght@400;500;600;700;800&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <main class="dashboard">
+    <header class="page-header">
+      <div class="brand">
+        <span class="brand-mark" aria-hidden="true">R</span>
+        <div><p class="eyebrow">Strategy dashboard</p><h1>Range Pilot</h1></div>
+      </div>
+      <div class="market-pill" aria-label="Selected market WETH to USDC">
+        <span class="asset eth">Ξ</span><span class="asset usdc">$</span><span>WETH / USDC</span><span class="live-dot"></span><span class="live-label">Live</span>
+      </div>
+    </header>
+
+    <section class="position-card" aria-labelledby="position-title">
+      <div class="card-heading">
+        <div><p class="eyebrow">Position health</p><h2 id="position-title">Balanced and earning</h2></div>
+        <span class="status-badge"><span></span> In range</span>
+      </div>
+      <div class="metrics">
+        <article class="metric primary"><p>Current WETH spot</p><strong>$3,482.16</strong><small>+1.84% <span>over 24h</span></small></article>
+        <article class="metric"><p>Average purchase price</p><strong>$3,218.40</strong><small><span>per WETH</span></small></article>
+        <article class="metric"><p>Total position value</p><strong>$52,746.18</strong><small><span>14.08 WETH + $3,705.15 USDC</span></small></article>
+        <article class="metric pnl"><p>Profit &amp; loss</p><strong>+$4,924.62</strong><small>+10.30% <span>all time</span></small></article>
+      </div>
+      <div class="action-row rebalance-row">
+        <div><p class="action-title">Strategy rebalance</p><p class="action-help" id="rebalance-help">Available when the smart contract timer expires.</p></div>
+        <button class="action-button rebalance-button" id="rebalance-button" type="button" disabled aria-describedby="rebalance-help" data-remaining="6138">Rebalance <span class="button-meta" id="rebalance-timer">01:42:18</span></button>
+      </div>
+    </section>
+
+    <section class="orders" aria-label="Liquidity orders">
+      <article class="order-card buy-card">
+        <div class="card-heading"><div><p class="eyebrow">Liquidity range</p><h2>Buy side</h2></div><span class="side-tag buy">Buying WETH</span></div>
+        <div class="allocation"><div class="allocation-value"><p>USDC in range</p><strong>$18,500.00</strong></div><div class="allocation-bar" aria-label="67 percent of USDC allocated"><span></span></div><p class="allocation-note"><b>$9,135.00</b> unallocated USDC</p></div>
+        <div class="range"><div class="range-track buy-track"><span class="range-current" title="Current spot price"></span></div><div class="range-labels"><div><span>Min price</span><strong>$2,880</strong></div><div class="range-mid"><span>Spot</span><strong>$3,482</strong></div><div class="right"><span>Max price</span><strong>$3,400</strong></div></div></div>
+        <div class="action-row"><div><p class="action-title">Harvest buy band</p><p class="action-help" id="buy-help">Price is outside the buy range.</p></div><button class="action-button harvest-button buy-action" type="button" disabled aria-describedby="buy-help" data-min="2880" data-max="3400" data-price="3482.16">Harvest</button></div>
+      </article>
+
+      <article class="order-card sell-card">
+        <div class="card-heading"><div><p class="eyebrow">Liquidity range</p><h2>Sell side</h2></div><span class="side-tag sell">Selling WETH</span></div>
+        <div class="allocation"><div class="allocation-value"><p>WETH ready to sell</p><strong>9.24 WETH</strong></div><div class="allocation-bar sell-bar" aria-label="74 percent of WETH allocated"><span></span></div><p class="allocation-note"><b>2.88 WETH</b> awaiting deployment</p></div>
+        <div class="range"><div class="range-track sell-track"><span class="range-current" title="Current spot price"></span></div><div class="range-labels"><div><span>Min price</span><strong>$3,550</strong></div><div class="range-mid"><span>Spot</span><strong>$3,482</strong></div><div class="right"><span>Max price</span><strong>$4,200</strong></div></div></div>
+        <div class="action-row"><div><p class="action-title">Harvest sell band</p><p class="action-help" id="sell-help">Price is outside the sell range.</p></div><button class="action-button harvest-button sell-action" type="button" disabled aria-describedby="sell-help" data-min="3550" data-max="4200" data-price="3482.16">Harvest</button></div>
+      </article>
+    </section>
+
+    <footer><span><i></i> Updated just now</span><span>Ethereum Mainnet</span></footer>
+  </main>
+  <script>
+    const rebalanceButton = document.querySelector('#rebalance-button');
+    const rebalanceTimer = document.querySelector('#rebalance-timer');
+    const rebalanceHelp = document.querySelector('#rebalance-help');
+    let remaining = Number(rebalanceButton.dataset.remaining);
+
+    const formatTime = seconds => [Math.floor(seconds / 3600), Math.floor(seconds % 3600 / 60), seconds % 60]
+      .map(value => String(value).padStart(2, '0')).join(':');
+
+    const tick = () => {
+      if (remaining <= 0) {
+        rebalanceButton.disabled = false;
+        rebalanceTimer.textContent = 'Ready';
+        rebalanceHelp.textContent = 'The smart contract timer has expired.';
+        return;
+      }
+      rebalanceTimer.textContent = formatTime(remaining--);
+      setTimeout(tick, 1000);
+    };
+    tick();
+
+    document.querySelectorAll('.harvest-button').forEach(button => {
+      const price = Number(button.dataset.price);
+      const inRange = price >= Number(button.dataset.min) && price <= Number(button.dataset.max);
+      if (inRange) {
+        button.disabled = false;
+        button.previousElementSibling.querySelector('.action-help').textContent = 'Price is inside this range.';
+      }
+    });
+  </script>
+</body>
+</html>

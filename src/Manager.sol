@@ -8,6 +8,7 @@ import {ReentrancyGuard} from "@openzeppelin/contracts/utils/ReentrancyGuard.sol
 
 import {LadderProxy} from "./LadderProxy.sol";
 import {Placement} from "./lib/Placement.sol";
+import {StrategyBuilder} from "./lib/StrategyBuilder.sol";
 import {OracleLib, IAggregatorV3} from "./lib/OracleLib.sol";
 import {ISwapRouter02, IQuoterV2} from "./interfaces/IUniswapV3.sol";
 
@@ -301,28 +302,181 @@ contract Manager is Ownable, ReentrancyGuard {
         return false;
     }
 
-    function _collectAndAccount() internal pure {
-        revert NotImplemented();
+    /// @dev Phase 1. Dock both proxies (stop quoting), sweep everything back to
+    ///      the Manager, then collapse each proxy's period into one trade and
+    ///      fold it into cost basis (§8). USDC never leaves the buy proxy except
+    ///      by converting to WETH, so `seed - remaining` is exactly what was
+    ///      spent; WETH acquired is what was just swept plus anything harvested
+    ///      earlier this period. Sell side is the mirror. Dry powder is reduced
+    ///      by the USDC that actually converted; the rest returns as balance and
+    ///      is re-made-ready by `_replenishPowder`.
+    function _collectAndAccount() internal {
+        if (buyProxy.strategyHash() != bytes32(0)) buyProxy.dockStrategy();
+        if (sellProxy.strategyHash() != bytes32(0)) sellProxy.dockStrategy();
+
+        (uint256 buyUsdc, uint256 buyWeth) = buyProxy.balances();
+        (uint256 sellUsdc, uint256 sellWeth) = sellProxy.balances();
+
+        buyProxy.sweep(address(this));
+        sellProxy.sweep(address(this));
+
+        // ---- BUY side: USDC spent -> WETH acquired ----
+        uint256 usdcSpent = lastBuySeedUsdc > buyUsdc ? lastBuySeedUsdc - buyUsdc : 0;
+        uint256 wethAcquired = buyWeth + harvestedWethFromBuy;
+        _bookBuys(usdcSpent, wethAcquired);
+        if (usdcSpent != 0) {
+            dryPowder = dryPowder > usdcSpent ? dryPowder - usdcSpent : 0;
+        }
+
+        // ---- SELL side: WETH disposed -> USDC received ----
+        uint256 wethSold = lastSellSeedWeth > sellWeth ? lastSellSeedWeth - sellWeth : 0;
+        uint256 usdcReceived = sellUsdc + harvestedUsdcFromSell;
+        _bookSells(wethSold, usdcReceived);
+
+        // Reset per-period counters.
+        lastBuySeedUsdc = 0;
+        lastSellSeedWeth = 0;
+        harvestedWethFromBuy = 0;
+        harvestedUsdcFromSell = 0;
     }
 
-    function _bootstrap(uint256 /*spot*/ ) internal pure {
-        revert NotImplemented();
+    /// @dev Establish an initial position so `avgEntry` is defined before the
+    ///      avg-band trades and placement run (README step 0). Market-buys one
+    ///      round's budget of WETH on Uniswap, gated by the same quote check as
+    ///      an immediate buy. No-op when there is no powder.
+    function _bootstrap(uint256 spot) internal {
+        uint256 amountIn = roundBudget();
+        if (amountIn == 0) return;
+        _buyOnUniswap(amountIn, spot);
     }
 
-    function _maybeImmediateBuy(uint256 /*spot*/ ) internal pure {
-        revert NotImplemented();
+    /// @dev Phase 2 (buy leg). Fires only on the 0.5% buffer breach reported by
+    ///      Placement — spends `growthPct` of the round budget on Uniswap now,
+    ///      rather than parking it all in the ladder. Gated by a QuoterV2
+    ///      simulation: executes only if the quoted fill clears the slippage
+    ///      threshold vs oracle spot.
+    function _maybeImmediateBuy(uint256 spot) internal {
+        Placement.Bands memory bands = Placement.compute(anchor, spot, avgEntryWad());
+        if (!bands.doGrowthBuy) return;
+
+        uint256 amountIn = roundBudget() * growthPct / BPS;
+        if (amountIn > dryPowder) amountIn = dryPowder;
+        if (amountIn == 0) return;
+
+        _buyOnUniswap(amountIn, spot);
     }
 
-    function _maybeImmediateSell(uint256 /*spot*/ ) internal pure {
-        revert NotImplemented();
+    /// @dev Phase 2 (sell leg). Fires only on the buffer breach — sells
+    ///      `decayPct` of inventory on Uniswap now. Floored by `minSell` so it
+    ///      never sells dust, clamped to WETH actually held, and gated by the
+    ///      same quote check.
+    function _maybeImmediateSell(uint256 spot) internal {
+        Placement.Bands memory bands = Placement.compute(anchor, spot, avgEntryWad());
+        if (!bands.doDecaySell) return;
+        if (inventoryWeth == 0) return;
+
+        uint256 amountIn = inventoryWeth * decayPct / BPS;
+        uint256 held = weth.balanceOf(address(this));
+        if (amountIn > held) amountIn = held;
+        if (amountIn < minSell) return;
+
+        uint256 minOut = amountIn * spot / AVG_SCALE * (BPS - slippageBps) / BPS;
+        uint256 quoted = _quote(address(weth), address(usdc), amountIn);
+        if (quoted < minOut) return;
+
+        uint256 got = _swapExactIn(address(weth), address(usdc), amountIn, minOut);
+        _bookSells(amountIn, got);
     }
 
-    function _deployBuyLadder(Placement.Bands memory /*bands*/ ) internal pure {
-        revert NotImplemented();
+    /// @dev Phase 4 (buy leg). Seed the buy proxy with the round budget in USDC
+    ///      and ship a fresh single-range strategy over [buyLow, buyHigh]. The
+    ///      proxy was docked in phase 1, so the new salt yields distinct bytes
+    ///      and a distinct hash (§11, §13).
+    function _deployBuyLadder(Placement.Bands memory bands) internal {
+        uint256 seed = roundBudget();
+        if (seed > dryPowder) seed = dryPowder;
+        if (seed == 0) return;
+
+        usdc.safeTransfer(address(buyProxy), seed);
+        _shipLadder(buyProxy, bands.buyLowRung, bands.buyHighRung, seed);
+        lastBuySeedUsdc = seed;
     }
 
-    function _deploySellLadder(Placement.Bands memory /*bands*/ ) internal pure {
-        revert NotImplemented();
+    /// @dev Phase 4 (sell leg). Seed the sell proxy with all held WETH inventory
+    ///      and ship a fresh single-range strategy over [sellLow, sellHigh].
+    function _deploySellLadder(Placement.Bands memory bands) internal {
+        uint256 seed = weth.balanceOf(address(this));
+        if (seed == 0) return;
+
+        weth.safeTransfer(address(sellProxy), seed);
+        _shipLadder(sellProxy, bands.sellLowRung, bands.sellHighRung, seed);
+        lastSellSeedWeth = seed;
+    }
+
+    /*//////////////////////////////////////////////////////////////
+                           UNISWAP / SHIP HELPERS
+    //////////////////////////////////////////////////////////////*/
+
+    /// @dev Simulate then execute a USDC->WETH buy, booking the fill. Skips
+    ///      silently if the quoted output fails the slippage threshold.
+    function _buyOnUniswap(uint256 amountIn, uint256 spot) private {
+        // expectedWeth = amountIn(USDC,6) * 1e30 / spot(WAD)  -> WETH(18)
+        uint256 minOut = amountIn * AVG_SCALE / spot * (BPS - slippageBps) / BPS;
+        uint256 quoted = _quote(address(usdc), address(weth), amountIn);
+        if (quoted < minOut) return;
+
+        uint256 got = _swapExactIn(address(usdc), address(weth), amountIn, minOut);
+        _bookBuys(amountIn, got);
+        dryPowder = dryPowder > amountIn ? dryPowder - amountIn : 0;
+    }
+
+    /// @dev QuoterV2 simulation. Not view (reverts internally and bubbles the
+    ///      result), so it is a plain call here; the pool swap reverts inside
+    ///      and persists no state.
+    function _quote(address tokenIn, address tokenOut, uint256 amountIn)
+        private
+        returns (uint256 amountOut)
+    {
+        (amountOut,,,) = quoter.quoteExactInputSingle(
+            IQuoterV2.QuoteExactInputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                amountIn: amountIn,
+                fee: poolFee,
+                sqrtPriceLimitX96: 0
+            })
+        );
+    }
+
+    /// @dev Exact-input single-hop swap on Uniswap v3, recipient = this.
+    function _swapExactIn(address tokenIn, address tokenOut, uint256 amountIn, uint256 minOut)
+        private
+        returns (uint256)
+    {
+        return swapRouter.exactInputSingle(
+            ISwapRouter02.ExactInputSingleParams({
+                tokenIn: tokenIn,
+                tokenOut: tokenOut,
+                fee: poolFee,
+                recipient: address(this),
+                amountIn: amountIn,
+                amountOutMinimum: minOut,
+                sqrtPriceLimitX96: 0
+            })
+        );
+    }
+
+    /// @dev Build and ship a single six-rung range on `proxy`. Salt and sqrt
+    ///      bounds come from the proxy so the encoded range and the recorded
+    ///      range are derived from the same rungs and cannot disagree (§13).
+    function _shipLadder(LadderProxy proxy, uint256 lowRung, uint256 highRung, uint256 amount)
+        private
+    {
+        uint64 salt = proxy.nextSalt();
+        uint256 sqrtMin = proxy.sqrtPriceOf(lowRung);
+        uint256 sqrtMax = proxy.sqrtPriceOf(highRung);
+        bytes memory program = StrategyBuilder.build(address(proxy), sqrtMin, sqrtMax, salt);
+        proxy.shipStrategy(aquaApp, program, lowRung, highRung, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
@@ -332,12 +486,22 @@ contract Manager is Ownable, ReentrancyGuard {
     /// @notice Protective pull of a proxy's ACQUIRED token to the Manager, so
     ///         it can't be converted back at a bad price. Books nothing; only
     ///         tallies for folding at the next rebalance (spec §12).
-    /// @dev Requires a single-token pull on LadderProxy — `sweep` moves BOTH
-    ///      tokens, which would empty the seed side too. See the note to the
-    ///      user; this stub reverts until that method exists.
+    /// @dev Pulls only the ACQUIRED token out of the named proxy via
+    ///      `pullToken` (buy proxy -> WETH, sell proxy -> USDC), leaving the
+    ///      seed side quoting. Books nothing: it only tallies the pulled amount
+    ///      into the harvest counter, which `_collectAndAccount` folds into
+    ///      cost basis at the next rebalance. Quantity is enough — the price it
+    ///      converted at emerges there from `seed - remaining` on the seed side.
     function harvest(bool buySide) external onlyOwner nonReentrant {
-        buySide; // silence unused warning until implemented
-        revert NotImplemented();
+        uint256 amount;
+        if (buySide) {
+            amount = buyProxy.pullToken(address(weth), address(this));
+            harvestedWethFromBuy += amount;
+        } else {
+            amount = sellProxy.pullToken(address(usdc), address(this));
+            harvestedUsdcFromSell += amount;
+        }
+        emit Harvested(buySide, amount);
     }
 
     /*//////////////////////////////////////////////////////////////
