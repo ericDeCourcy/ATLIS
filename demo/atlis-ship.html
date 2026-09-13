@@ -1,0 +1,334 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>ATLIS — ship</title>
+<style>
+  :root { --ink:#111111; --blue:#1E3A8A; --line:#e5e7eb; --muted:#6b7280; }
+  * { box-sizing: border-box; }
+  body {
+    margin:0; background:#fff; color:var(--ink);
+    font:15px/1.5 -apple-system,BlinkMacSystemFont,"Segoe UI",Roboto,Helvetica,Arial,sans-serif;
+    display:flex; min-height:100vh; align-items:center; justify-content:center; padding:24px;
+  }
+  .card { width:100%; max-width:520px; border:1px solid var(--line); border-radius:14px; padding:28px; }
+  h1 { margin:0 0 2px; font-size:20px; letter-spacing:.02em; }
+  .sub { margin:0 0 22px; color:var(--muted); font-size:13px; }
+  label { display:block; font-size:12px; font-weight:600; color:var(--muted); margin:0 0 6px; text-transform:uppercase; letter-spacing:.04em; }
+  input {
+    width:100%; padding:11px 12px; font-size:15px; border:1px solid var(--line);
+    border-radius:9px; outline:none; margin-bottom:16px; font-variant-numeric:tabular-nums;
+  }
+  input:focus { border-color:var(--blue); box-shadow:0 0 0 3px rgba(30,58,138,.12); }
+  button {
+    width:100%; padding:13px 16px; font-size:15px; font-weight:600; color:#fff;
+    background:var(--ink); border:0; border-radius:10px; cursor:pointer;
+  }
+  button:hover { background:#000; }
+  button:disabled { opacity:.55; cursor:default; }
+  .accent { background:var(--blue); }
+  .accent:hover { background:#182f6e; }
+  .row { display:flex; gap:14px; }
+  .row > div { flex:1; }
+  .status { margin-top:16px; font-size:13px; color:var(--muted); word-break:break-word; }
+  .wallet { font-size:12px; color:var(--muted); margin-bottom:18px; min-height:16px; }
+  pre {
+    margin:14px 0 0; padding:12px; background:#f9fafb; border:1px solid var(--line);
+    border-radius:9px; font-size:11.5px; line-height:1.45; white-space:pre-wrap; word-break:break-all;
+    color:#374151; max-height:220px; overflow:auto;
+  }
+  a { color:var(--blue); }
+  .err { color:#b91c1c; }
+  .ok { color:#166534; }
+
+  /* Token seed section */
+  .token {
+    display:flex; align-items:center; gap:12px;
+    border:1px solid var(--line); border-radius:10px; padding:10px 12px; margin-bottom:12px;
+  }
+  .token .tmeta { min-width:0; flex:0 0 auto; }
+  .token .tsym { font-weight:600; font-size:14px; }
+  .token .tdec { color:var(--muted); font-size:11px; }
+  .token .taddr {
+    display:block; color:var(--muted); font-size:10.5px;
+    font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace; word-break:break-all;
+  }
+  .token input { margin:0; text-align:right; }
+</style>
+</head>
+<body>
+  <div class="card">
+    <h1>ATLIS &mdash; ship</h1>
+    <p class="sub">Build a single-range strategy from a USDC/WETH price band and ship it via your wallet.</p>
+
+    <div class="wallet" id="wallet">Wallet not connected.</div>
+
+    <div class="row">
+      <div>
+        <label for="priceMin">Price min (USDC/WETH)</label>
+        <input id="priceMin" inputmode="decimal" placeholder="3000" value="3000" />
+      </div>
+      <div>
+        <label for="priceMax">Price max (USDC/WETH)</label>
+        <input id="priceMax" inputmode="decimal" placeholder="4000" value="4000" />
+      </div>
+    </div>
+
+    <label>Seed amounts (optional)</label>
+    <div class="token">
+      <div class="tmeta">
+        <span class="tsym">USDC</span> <span class="tdec">· 6 decimals</span>
+        <span class="taddr" id="usdcAddr"></span>
+      </div>
+      <input id="amtUsdc" inputmode="decimal" placeholder="0.0" />
+    </div>
+    <div class="token">
+      <div class="tmeta">
+        <span class="tsym">WETH</span> <span class="tdec">· 18 decimals</span>
+        <span class="taddr" id="wethAddr"></span>
+      </div>
+      <input id="amtWeth" inputmode="decimal" placeholder="0.0" />
+    </div>
+
+    <button id="shipBtn" class="accent">Ship</button>
+
+    <div class="status" id="status"></div>
+    <pre id="preview" hidden></pre>
+  </div>
+
+<script src="https://cdn.jsdelivr.net/npm/ethers@6.13.4/dist/ethers.umd.min.js"></script>
+<script>
+(function () {
+  "use strict";
+
+  // ---- Fixed parameters (from the request) ----
+  const AQUA = "0x1111113CCf1426A8E30e2bfF5E005d929bF6a90a"; // contract ship() is called on
+  const APP  = "0x111111338c5091E8440b67B168bAe16a668AC0De"; // ship() `app` argument
+
+  // ---- Seed tokens (Base mainnet) ----
+  // Addresses are lowercased then re-checksummed at runtime so a bad hardcoded
+  // checksum can never throw. Amounts come from the inputs below, scaled by decimals.
+  const USDC = { address: ethers.getAddress("0x833589fcd6edb6e08f4c7c32d4f71b54bda02913"), symbol: "USDC", decimals: 6 };
+  const WETH = { address: ethers.getAddress("0x4200000000000000000000000000000000000006"), symbol: "WETH", decimals: 18 };
+
+  // ---- Strategy template (verbatim from StrategyBuilder.sol) ----
+  const HEAD = "0x211426ffc7d378e8e49be2c483295a3e3e511f96a4681c180001e8488063d4faf54bf8c898dc6ddc689c76ab12b4614a1240";
+  const TAIL = "0x15040007a12011001408";
+  const TRAITS = 1n << 254n;            // StrategyBuilder.TRAITS
+  const USDC_WETH_EXP = 24n;            // AquaPriceMath.USDC_WETH_EXP
+  const U64_MASK = (1n << 64n) - 1n;
+
+  const $ = (id) => document.getElementById(id);
+  const coder = ethers.AbiCoder.defaultAbiCoder();
+  const shipIface = new ethers.Interface([
+    "function ship(address app, bytes strategy, address[] tokens, uint256[] amounts) returns (bytes32)"
+  ]);
+
+  // ---- Wallet provider selection (MetaMask specifically) ----
+  // Uses EIP-6963 (multi-wallet discovery) as the reliable way to single out
+  // MetaMask when another injected wallet (e.g. Ambire) is also present.
+  let provider = null;                       // the chosen MetaMask EIP-1193 provider
+  let account = null;
+  const discovered = new Map();              // rdns -> { info, provider }
+
+  window.addEventListener("eip6963:announceProvider", (e) => {
+    if (e.detail && e.detail.info && e.detail.info.rdns) {
+      discovered.set(e.detail.info.rdns, e.detail);
+    }
+  });
+  window.dispatchEvent(new Event("eip6963:requestProvider"));
+
+  function pickMetaMask() {
+    // 1) EIP-6963: MetaMask announces with rdns "io.metamask"
+    const mm = discovered.get("io.metamask");
+    if (mm) return mm.provider;
+    // 2) Legacy multi-provider array
+    const eth = window.ethereum;
+    if (eth && Array.isArray(eth.providers)) {
+      const p = eth.providers.find((x) => x.isMetaMask && !x.isBraveWallet && !x.isAmbire);
+      if (p) return p;
+    }
+    // 3) Single injected provider that is MetaMask (and not Ambire spoofing)
+    if (eth && eth.isMetaMask && !eth.isAmbire) return eth;
+    return null;
+  }
+
+  function ensureProvider() {
+    if (provider) return provider;
+    const mm = pickMetaMask();
+    if (!mm) throw new Error("MetaMask not found. Install/enable it and reload.");
+    provider = mm;
+    provider.on && provider.on("accountsChanged", (a) => {
+      account = (a && a.length) ? ethers.getAddress(a[0]) : null;
+      $("wallet").innerHTML = account ? "Connected: <strong>" + account + "</strong>" : "Wallet not connected.";
+      refreshPreview();
+    });
+    return provider;
+  }
+
+  // Integer square root (floor), Newton — mirrors AquaPriceMath.isqrt.
+  function isqrt(n) {
+    if (n < 0n) throw new Error("isqrt of negative");
+    if (n < 2n) return n;
+    let x = n, y = (x + 1n) >> 1n;
+    while (y < x) { x = y; y = (x + n / x) >> 1n; }
+    return x;
+  }
+
+  // AquaPriceMath.toSqrtPriceUsdcWeth: isqrt(priceWad * 10^exp / 1e18).
+  function toSqrtPriceUsdcWeth(priceWad) {
+    return isqrt((priceWad * (10n ** USDC_WETH_EXP)) / (10n ** 18n));
+  }
+
+  // DemoStrategyBuilder.deriveSalt: low 64 bits of keccak256(abi.encode(maker,min,max)).
+  function deriveSalt(maker, minWad, maxWad) {
+    const enc = coder.encode(["address", "uint256", "uint256"], [maker, minWad, maxWad]);
+    return BigInt(ethers.keccak256(enc)) & U64_MASK;
+  }
+
+  // Build the exact bytes StrategyBuilder.build returns (ABI-encoded Strategy).
+  function buildStrategy(maker, minStr, maxStr) {
+    const minWad = ethers.parseUnits(minStr.trim(), 18);
+    const maxWad = ethers.parseUnits(maxStr.trim(), 18);
+    if (minWad <= 0n) throw new Error("Price min must be greater than 0.");
+
+    const sqrtMin = toSqrtPriceUsdcWeth(minWad);
+    const sqrtMax = toSqrtPriceUsdcWeth(maxWad);
+    if (sqrtMin === 0n || sqrtMin >= sqrtMax) {
+      throw new Error("Require priceMin < priceMax (BadPriceBounds).");
+    }
+
+    const salt = deriveSalt(maker, minWad, maxWad);
+
+    // program = abi.encodePacked(HEAD, sqrtMin, sqrtMax, TAIL, salt)
+    const program = ethers.solidityPacked(
+      ["bytes", "uint256", "uint256", "bytes", "uint64"],
+      [HEAD, sqrtMin, sqrtMax, TAIL, salt]
+    );
+    // strategy = abi.encode(Strategy{maker, traits, program})
+    const strategy = coder.encode(
+      ["tuple(address,uint256,bytes)"],
+      [[maker, TRAITS, program]]
+    );
+    return { minWad, maxWad, sqrtMin, sqrtMax, salt, program, strategy };
+  }
+
+  // Scale an input value by the token's decimals. Empty -> 0n. Throws on bad input.
+  function scaledAmount(val, decimals) {
+    const t = (val || "").trim();
+    if (!t) return 0n;
+    return ethers.parseUnits(t, decimals);
+  }
+
+  // Build parallel tokens[] / amounts[] from the two amount inputs.
+  // Only tokens with a positive amount are included.
+  function collectSeed() {
+    const tokens = [];
+    const amounts = [];
+    const usdc = scaledAmount($("amtUsdc").value, USDC.decimals);
+    if (usdc > 0n) { tokens.push(USDC.address); amounts.push(usdc); }
+    const weth = scaledAmount($("amtWeth").value, WETH.decimals);
+    if (weth > 0n) { tokens.push(WETH.address); amounts.push(weth); }
+    return { tokens, amounts, usdc, weth };
+  }
+
+  function setStatus(msg, cls) {
+    const el = $("status");
+    el.className = "status" + (cls ? " " + cls : "");
+    el.innerHTML = msg;
+  }
+
+  function showPreview(maker, b, seed) {
+    const seedLine = (seed && seed.tokens.length)
+      ? seed.tokens.map((t, i) => seed.amounts[i].toString() + " @ " + t).join("\n          ")
+      : "none";
+    $("preview").hidden = false;
+    $("preview").textContent =
+      "maker   : " + maker + "\n" +
+      "app     : " + APP + "\n" +
+      "sqrtMin : " + b.sqrtMin.toString() + "\n" +
+      "sqrtMax : " + b.sqrtMax.toString() + "\n" +
+      "salt    : " + b.salt.toString() + "\n" +
+      "seed    : " + seedLine + "\n" +
+      "strategy: " + b.strategy;
+  }
+
+  async function connect() {
+    const p = ensureProvider();
+    const accts = await p.request({ method: "eth_requestAccounts" });
+    account = ethers.getAddress(accts[0]);
+    $("wallet").innerHTML = "Connected: <strong>" + account + "</strong>";
+    return account;
+  }
+
+  async function ship() {
+    const btn = $("shipBtn");
+    btn.disabled = true;
+    try {
+      setStatus("Connecting wallet\u2026");
+      const p = ensureProvider();
+      const maker = account || await connect();
+
+      setStatus("Building strategy\u2026");
+      const b = buildStrategy(maker, $("priceMin").value, $("priceMax").value);
+      const seed = collectSeed();
+      showPreview(maker, b, seed);
+
+      const data = shipIface.encodeFunctionData("ship", [APP, b.strategy, seed.tokens, seed.amounts]);
+
+      setStatus("Confirm the transaction in your wallet\u2026");
+      const txHash = await p.request({
+        method: "eth_sendTransaction",
+        params: [{ from: maker, to: AQUA, data: data }]
+      });
+      setStatus("Ship submitted. Tx hash:<br><strong>" + txHash + "</strong>", "ok");
+    } catch (e) {
+      const msg = (e && (e.info?.error?.message || e.shortMessage || e.message)) || String(e);
+      setStatus("Error: " + msg, "err");
+    } finally {
+      btn.disabled = false;
+    }
+  }
+
+  // Live preview of the built bytes as inputs change (uses connected maker if any,
+  // otherwise the zero address purely for display).
+  function refreshPreview() {
+    try {
+      const maker = account || "0x0000000000000000000000000000000000000000";
+      const b = buildStrategy(maker, $("priceMin").value, $("priceMax").value);
+      let seed = { tokens: [], amounts: [] };
+      try { seed = collectSeed(); } catch (_) { /* ignore bad amount while typing */ }
+      showPreview(maker, b, seed);
+    } catch (_) { /* ignore while typing */ }
+  }
+
+  // Render token addresses in the UI.
+  $("usdcAddr").textContent = USDC.address;
+  $("wethAddr").textContent = WETH.address;
+
+  $("shipBtn").addEventListener("click", ship);
+  ["priceMin", "priceMax", "amtUsdc", "amtWeth"].forEach((id) =>
+    $(id).addEventListener("input", refreshPreview)
+  );
+
+  // Passive autoconnect: give EIP-6963 a moment to announce, then read accounts
+  // from MetaMask specifically (no prompt).
+  refreshPreview();
+  setTimeout(() => {
+    const mm = pickMetaMask();
+    if (!mm) return;
+    provider = provider || mm;
+    provider.request({ method: "eth_accounts" }).then((a) => {
+      if (a && a.length) {
+        account = ethers.getAddress(a[0]);
+        $("wallet").innerHTML = "Connected: <strong>" + account + "</strong>";
+        ensureProvider(); // wire up accountsChanged
+        refreshPreview();
+      }
+    }).catch(() => {});
+  }, 150);
+})();
+</script>
+</body>
+</html>
