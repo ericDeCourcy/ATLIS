@@ -3,7 +3,9 @@
 An accumulation strategy on 1inch Aqua. Holds USDC, buys the volatile asset on
 the way down, sells above cost, sweeps realized proceeds out.
 
-Architecture is a **Manager** plus a set of **immutable child proxies**.
+Architecture is a **Manager** plus exactly **two immutable child proxies** —
+one buy side, one sell side. Each is deployed once and reused for the life of
+the protocol, docking and re-shipping its strategy as the ladder moves.
 
 Rebalancing prefers the cheapest operation that achieves the target:
 
@@ -63,20 +65,21 @@ proxy's rungs sit and which asset seeds it — not a one-way constraint on how
 it can fill. A range that converts and then converts back captures fees on
 both legs; this is expected and desirable.
 
-## 3. Proxy registry and reuse
+## 3. Why two proxies, not many
 
-The Manager keeps persistent mappings from ladder anchor to proxy:
+An earlier design deployed one proxy per rung range and kept every strategy
+alive, moving capital between proxies rather than docking. That existed to
+avoid docking, on the assumption docking was expensive.
 
-```
-maxRungToBuyProxy[rl]   -> buy proxy covering rungs rl .. rl-5
-minRungToSellProxy[rh]  -> sell proxy covering rungs rh .. rh+5
-```
+Measurement removed the assumption: ship ~82k gas, dock ~35k, push ~57k. The
+expensive transactions were expensive because of a 341x base-fee spike, not the
+operation. A full dock-and-reship cycle costs a fraction of a cent on Base.
 
-On rebalance the Manager computes the target `rl` / `rh`, looks up the mapping,
-and either reuses the existing proxy or deploys a new one and records it.
-Reuse is expected to be uncommon within a single run — its main purpose is
-re-running the strategy after a position closes out, so previously built
-ladders can be picked back up without redeploying.
+Two permanent proxies are therefore strictly simpler: no registry, no factory,
+no per-rung-range mappings, no deploy cost when the ladder shifts, and the
+accounting watches two fixed addresses instead of a growing set. Nothing is
+lost — rungs within a proxy were never independently funded anyway, since they
+all draw on that proxy's single declared balance (Section 9).
 
 ## 4. Asset segregation
 
@@ -339,3 +342,75 @@ without a fill, and an unsolicited third-party `push` (Section 11) raises a
 declared balance with no offsetting movement. The Manager must snapshot
 declared balances immediately after any top-up, and treat a declared increase
 on the seed side that it did not itself cause as a donation rather than a fill.
+
+## 13. Strategy construction
+
+The program shipped to Aqua is built from rung numbers inside the proxy, which
+is the only contract holding both the ladder anchor and the side. Rung numbers
+go in, bytes come out, and the bounds recorded on-chain are derived from the
+same rungs that produced the bytes — so a mismatch between the declared range
+and the encoded range is not representable.
+
+### Encoding
+
+Each instruction is `[opcode: 1 byte][argsLength: 1 byte][args: N bytes]`.
+A program is instructions concatenated, with no header or terminator.
+
+The opcode byte is an **index into the array returned by
+`AquaOpcodes._opcodes()`** — a fixed-size array of function pointers — not an
+enum value. This matters: `swap-vm` on `main` has refactored to an enum scheme
+in `libs/OpcodeList.sol` with entirely different numbers. Deployed routers are
+built from the tagged releases, so **use the array indices, not main's enum.**
+
+### Instruction set
+
+Verified against a live Base mainnet strategy and cross-checked with
+`swap-vm` v1.0.1 `src/opcodes/AquaOpcodes.sol`:
+
+| Opcode | Args | Instruction |
+|---|---|---|
+| `0x11` | 0 | `XYCSwap._xycSwapXD` |
+| `0x12` | 64 | `XYCConcentrate._xycConcentrateGrowLiquidity2D` |
+| `0x14` | 8 | `Controls._salt` |
+| `0x15` | 4 | `Fee._flatFeeAmountInXD` |
+| `0x1c` | 24 | `Fee._aquaProtocolFeeAmountInXD` |
+| `0x21` | 20 | `Controls._onlyTxOriginTokenBalanceNonZero` |
+
+### Program shape
+
+```
+concentrate(sqrtPriceMin, sqrtPriceMax)   grow virtual liquidity into the band
+flatFeeIn(fee)                            deduct fee from amountIn
+xycSwap()                                 compute amounts from balances
+salt(nonce)                               no runtime effect; unique hash
+```
+
+### Salt
+
+```
+salt = uint64(keccak256(chainId, proxy, nonce))
+```
+
+`nonce` is proxy-local, monotonic, and advanced only inside `shipStrategy`.
+Nothing external can move or reset it. This is what makes a permanent proxy
+possible: docking is terminal for a given set of bytes, so every ship must
+produce a distinct hash.
+
+The Salt instruction carries a `uint64`, so the hash is truncated to 64 bits.
+A collision only matters for the same maker and app, and fails loudly (`ship`
+reverts with `StrategiesMustBeImmutable`) rather than corrupting state.
+
+## 14. Failure policy
+
+This is a hackathon build. Customisation and extensibility are explicitly
+deprioritised in favour of fewer lines of code.
+
+If a strategy misbehaves, the response is not to reconfigure it in place:
+
+1. Emergency dock across both proxies, stopping all quoting.
+2. Sweep all assets back to the Manager.
+3. Shut the protocol down.
+4. Redeploy with corrected strategies.
+
+No in-place strategy repair, no migration path, no versioning. The two proxies
+are cheap to redeploy and hold no state that cannot be reconstructed.
