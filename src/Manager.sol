@@ -18,7 +18,7 @@ import {ISwapRouter02, IQuoterV2} from "./interfaces/IUniswapV3.sol";
 ///         performs all accounting, and executes Uniswap v3 trades directly at
 ///         each rebalance. See specs.md.
 ///
-/// @dev ACCOUNTING (spec §8). One source of truth: `costBasisUsdc`, the USDC
+/// @dev ACCOUNTING (spec §7). One source of truth: `costBasisUsdc`, the USDC
 ///      paid for the WETH currently held (`inventoryWeth`). `avgEntry` derives
 ///      from the two. Buys add to both; sells remove a proportional slice of
 ///      both, so avgEntry is unchanged by sells and falls only on acquisition.
@@ -53,7 +53,7 @@ contract Manager is Ownable, ReentrancyGuard {
     IQuoterV2 public immutable quoter;
     uint24 public immutable poolFee; // Uniswap v3 fee tier (lowest with liquidity)
 
-    // ---- strategy parameters (immutable; redeploy to change, per §14) ----
+    // ---- strategy parameters (immutable; redeploy to change, per §13) ----
     uint256 public immutable rebalancePeriod; // seconds between periodic rebalances
     uint256 public immutable newPowderPerPeriod; // USDC made-ready each period (the drip / cap)
     uint256 public immutable purchPct; // bps of dry powder that sizes the round budget
@@ -266,7 +266,7 @@ contract Manager is Ownable, ReentrancyGuard {
                            REBALANCE  (stubbed)
     //////////////////////////////////////////////////////////////*/
 
-    /// @notice Keeper-triggered rebalance. Phases follow spec §6.
+    /// @notice Keeper-triggered rebalance. Phases follow spec §5.
     /// @dev Internals are stubbed pending the next build step; the top-level
     ///      flow is fixed so the accounting above can be reviewed in isolation.
     function rebalance() external onlyOwner nonReentrant {
@@ -297,14 +297,14 @@ contract Manager is Ownable, ReentrancyGuard {
     }
 
     /// @dev Early trigger: spot outside the outermost live rung on either side
-    ///      (§6). Stubbed to false for now.
+    ///      (§5). Stubbed to false for now.
     function _earlyTrigger() internal view returns (bool) {
         return false;
     }
 
     /// @dev Phase 1. Dock both proxies (stop quoting), sweep everything back to
     ///      the Manager, then collapse each proxy's period into one trade and
-    ///      fold it into cost basis (§8). USDC never leaves the buy proxy except
+    ///      fold it into cost basis (§7). USDC never leaves the buy proxy except
     ///      by converting to WETH, so `seed - remaining` is exactly what was
     ///      spent; WETH acquired is what was just swept plus anything harvested
     ///      earlier this period. Sell side is the mirror. Dry powder is reduced
@@ -391,7 +391,7 @@ contract Manager is Ownable, ReentrancyGuard {
     /// @dev Phase 4 (buy leg). Seed the buy proxy with the round budget in USDC
     ///      and ship a fresh single-range strategy over [buyLow, buyHigh]. The
     ///      proxy was docked in phase 1, so the new salt yields distinct bytes
-    ///      and a distinct hash (§11, §13).
+    ///      and a distinct hash (§10, §12).
     function _deployBuyLadder(Placement.Bands memory bands) internal {
         uint256 seed = roundBudget();
         if (seed > dryPowder) seed = dryPowder;
@@ -468,7 +468,7 @@ contract Manager is Ownable, ReentrancyGuard {
 
     /// @dev Build and ship a single six-rung range on `proxy`. Salt and sqrt
     ///      bounds come from the proxy so the encoded range and the recorded
-    ///      range are derived from the same rungs and cannot disagree (§13).
+    ///      range are derived from the same rungs and cannot disagree (§12).
     function _shipLadder(LadderProxy proxy, uint256 lowRung, uint256 highRung, uint256 amount)
         private
     {
@@ -485,7 +485,7 @@ contract Manager is Ownable, ReentrancyGuard {
 
     /// @notice Protective pull of a proxy's ACQUIRED token to the Manager, so
     ///         it can't be converted back at a bad price. Books nothing; only
-    ///         tallies for folding at the next rebalance (spec §12).
+    ///         tallies for folding at the next rebalance (spec §11).
     /// @dev Pulls only the ACQUIRED token out of the named proxy via
     ///      `pullToken` (buy proxy -> WETH, sell proxy -> USDC), leaving the
     ///      seed side quoting. Books nothing: it only tallies the pulled amount
@@ -510,7 +510,7 @@ contract Manager is Ownable, ReentrancyGuard {
 
     /// @notice Dock both strategies (stop all quoting) and sweep all assets to
     ///         the Manager. Does not book or take profit — a loss-cutting
-    ///         circuit breaker only (§10, §14).
+    ///         circuit breaker only (§9, §13).
     function emergencyDock() external onlyOwner nonReentrant {
         if (buyProxy.strategyHash() != bytes32(0)) buyProxy.dockStrategy();
         if (sellProxy.strategyHash() != bytes32(0)) sellProxy.dockStrategy();

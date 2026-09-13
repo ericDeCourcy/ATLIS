@@ -282,10 +282,10 @@ contract LadderProxy is Ownable {
 
     /// @notice Transfers the entire real balance of a single `token` to `to`,
     ///         leaving the other token untouched. Used by harvest to pull only
-    ///         the ACQUIRED token, so the seed side keeps quoting (spec §12).
+    ///         the ACQUIRED token, so the seed side keeps quoting (spec §11).
     /// @dev Does not dock and does not touch Aqua's declared balance, so the
     ///      strategy keeps quoting the harvested side at a depth it can no
-    ///      longer honour — accepted per §12 (resolvers simulate before
+    ///      longer honour — accepted per §11 (resolvers simulate before
     ///      routing, so an unfillable quote is simply not selected).
     /// @return amount The token amount transferred out.
     function pullToken(address token, address to) external onlyOwner returns (uint256 amount) {

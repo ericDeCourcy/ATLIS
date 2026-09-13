@@ -65,23 +65,7 @@ proxy's rungs sit and which asset seeds it — not a one-way constraint on how
 it can fill. A range that converts and then converts back captures fees on
 both legs; this is expected and desirable.
 
-## 3. Why two proxies, not many
-
-An earlier design deployed one proxy per rung range and kept every strategy
-alive, moving capital between proxies rather than docking. That existed to
-avoid docking, on the assumption docking was expensive.
-
-Measurement removed the assumption: ship ~82k gas, dock ~35k, push ~57k. The
-expensive transactions were expensive because of a 341x base-fee spike, not the
-operation. A full dock-and-reship cycle costs a fraction of a cent on Base.
-
-Two permanent proxies are therefore strictly simpler: no registry, no factory,
-no per-rung-range mappings, no deploy cost when the ladder shifts, and the
-accounting watches two fixed addresses instead of a growing set. Nothing is
-lost — rungs within a proxy were never independently funded anyway, since they
-all draw on that proxy's single declared balance (Section 9).
-
-## 4. Asset segregation
+## 3. Asset segregation
 
 **Only one asset type is ever transferred into a proxy** — USDC into buy
 proxies, BTC into sell proxies. A proxy will nonetheless come to hold both as
@@ -94,7 +78,7 @@ delta over the period has a known sign:
 - buy proxy: BTC delta >= 0, USDC delta <= 0
 - sell proxy: BTC delta <= 0, USDC delta >= 0
 
-## 5. Order placement (clamped)
+## 4. Order placement (clamped)
 
 Both sides are clamped against spot so no bid is ever above market and no ask
 is ever below market.
@@ -110,9 +94,9 @@ sell:  rh = max( rungAbove(spot), rungAbove(avgEntry) )
 When spot and `avgEntry` diverge, one side tracks spot and the other parks far
 away and goes inert. This is expected.
 
-## 6. Rebalance loop
+## 5. Rebalance loop
 
-Keeper-triggered. Distinct from a **harvest** (Section 12), which is a lighter
+Keeper-triggered. Distinct from a **harvest** (Section 11), which is a lighter
 operation the keeper may run at any time between rebalances.
 
 **Trigger conditions:**
@@ -132,7 +116,7 @@ operation the keeper may run at any time between rebalances.
    deploy the target proxies, and transfer USDC to the buy proxy and BTC to
    the sell proxy for this round.
 
-## 7. Keeper deposits
+## 6. Keeper deposits
 
 The keeper may add capital at a rebalance:
 
@@ -145,7 +129,7 @@ Deposits go to the Manager, never directly to a proxy. Assets sent directly to
 a proxy are indistinguishable from fill flow and will be silently absorbed
 into the cost basis at the next rebalance.
 
-## 8. Accounting
+## 7. Accounting
 
 All in the Manager. Aggregated across dry powder and every proxy.
 
@@ -190,7 +174,7 @@ Realized alone is not a performance measure: profits leave permanently while
 losses remain in inventory, so realized skews positive through arbitrarily
 bad drawdowns. Report mark-to-market alongside it.
 
-## 9. Capital allocation
+## 8. Capital allocation
 
 Aqua's shared liquidity is scoped **per maker**. Each proxy is its own maker,
 so a buy proxy's 6 ranges all quote against that proxy's single USDC balance.
@@ -202,21 +186,21 @@ which that proxy's balance may be spent*, not six separately funded orders.
 
 Splitting capital across proxies is the only way to fund rungs independently.
 
-## 10. Risk controls
+## 9. Risk controls
 
 - **Total deployed cap.** Every rung down requires more capital while profit
   leaves permanently. Without a hard cap this is a martingale bounded only by
   solvency.
 - **Emergency dock.** A Manager-triggered dock across all proxies stops all
   quoting immediately. It cuts losses; it does not book profit or close a round
-  trip. Note it is terminal for those strategy bytes (Section 11).
+  trip. Note it is terminal for those strategy bytes (Section 10).
 - **Sweep without dock.** Sweeping tokens out does not touch Aqua, so the
   declared balance stays stale and the strategy keeps quoting depth the proxy
   cannot honour. Fills then revert at `Aqua.pull`. This is accepted by design
-  for harvests (Section 12); it is only a hazard when a proxy is being retired,
+  for harvests (Section 11); it is only a hazard when a proxy is being retired,
   so **dock before retiring**.
 
-## 11. Aqua balance semantics
+## 10. Aqua balance semantics
 
 Verified against `1inch/aqua` `src/Aqua.sol` and `1inch/swap-vm`
 `contracts/instructions/XYCConcentrate.sol`.
@@ -258,7 +242,7 @@ Two consequences:
   transfer is a self-transfer moving nothing while the declared balance rises.
   This is how `LadderProxy.topUp` works.
 - **Donations corrupt net-delta accounting.** An unsolicited push increases a
-  proxy's balance with no offsetting movement, which Section 8's collapse reads
+  proxy's balance with no offsetting movement, which Section 7's collapse reads
   as free acquisition and which drags `avgEntry` down. To book donations
   separately the Manager must read `Pushed` events and attribute by sender.
 
@@ -272,7 +256,7 @@ or nonce mixed in — **the same program can never be re-shipped by that maker.*
 Re-shipping the same rung range therefore requires different bytes. Vary the
 `Salt` instruction in the program to produce a distinct hash.
 
-## 12. Harvesting partial fills
+## 11. Harvesting partial fills
 
 Ranged liquidity fills continuously, so a proxy accumulates the opposite token
 long before its band is fully traversed. Waiting for a full rebalance to
@@ -295,7 +279,7 @@ A harvest does exactly two things:
 2. The Manager records the price paid for it.
 
 It does **not** dock, does **not** re-ship, and does **not** top up. Top-ups
-(Section 11) are a separate operation on their own schedule.
+(Section 10) are a separate operation on their own schedule.
 
 ### Why no dock
 
@@ -333,17 +317,17 @@ pricePaid   = usdcSpent / wethAcquired
 ```
 
 The Manager folds `usdcSpent` and `wethAcquired` into `costBasisUsdc` and
-`inventoryBtc` exactly as in Section 8. Sell-side harvests are the mirror and
+`inventoryBtc` exactly as in Section 7. Sell-side harvests are the mirror and
 are booked as disposals.
 
 **Caveat:** this arithmetic is only valid if nothing other than fills moved the
 declared balance since the last observation. A `topUp` raises declared USDC
-without a fill, and an unsolicited third-party `push` (Section 11) raises a
+without a fill, and an unsolicited third-party `push` (Section 10) raises a
 declared balance with no offsetting movement. The Manager must snapshot
 declared balances immediately after any top-up, and treat a declared increase
 on the seed side that it did not itself cause as a donation rather than a fill.
 
-## 13. Strategy construction
+## 12. Strategy construction
 
 The program shipped to Aqua is built from rung numbers inside the proxy, which
 is the only contract holding both the ladder anchor and the side. Rung numbers
@@ -400,7 +384,7 @@ The Salt instruction carries a `uint64`, so the hash is truncated to 64 bits.
 A collision only matters for the same maker and app, and fails loudly (`ship`
 reverts with `StrategiesMustBeImmutable`) rather than corrupting state.
 
-## 14. Failure policy
+## 13. Failure policy
 
 This is a hackathon build. Customisation and extensibility are explicitly
 deprioritised in favour of fewer lines of code.
