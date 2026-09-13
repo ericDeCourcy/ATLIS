@@ -10,20 +10,18 @@ ATLIS will track PnL automatically and divert some portion of profits into a "ta
 
 1inch Aqua
 
-# USDC-BTC pair
+# USDC-WETH pair
 
-The first iteration of ATLIS will specifically focus on the BTC/USDC pair, with the intention of using USDC to buy and sell BTC and gain more USDC.
-
-We will actually be using USDC and WBTC at first, because BTC is not natively available. 
+The first iteration of ATLIS will specifically focus on the WETH/USDC pair on Base Network, with the intention of using USDC to buy and sell WETH and gain more USDC.
 
 # How it works
 
-0. (#TODO not sure about this yet) ATLIS will market-buy some amount of BTC to seed the strategy
-1. Every "period", ATLIS will determine how much USDC to invest into the strategy. This increases over time as the strategy goes on. ATLIS will take the current BTC price and determine a price-band to LP for. 
-2. During the period, BTC price will fluctuate in price. If BTC price goes up, ATLIS will sell some BTC held by the strategy. Otherwise, it will buy BTC at a price below the spot price at the beginning of the period
+0. (#TODO not sure about this yet) ATLIS will market-buy some amount of WETH to seed the strategy
+1. Every "period", ATLIS will determine how much USDC to invest into the strategy. This increases over time as the strategy goes on. ATLIS will take the current WETH price and determine a price-band to LP for. 
+2. During the period, WETH price will fluctuate in price. If WETH price goes up, ATLIS will sell some WETH held by the strategy. Otherwise, it will buy WETH at a price below the spot price at the beginning of the period
 3. At the end of the period, ATLIS will "dock" the position out of Aqua and examine the balances. 
-    a. If BTC price is sufficiently higher than the "average entry" price for the position, a portion will be sold and the profits from the sale will be optionally transferred to a "profit", "tax" and "principle" wallet.
-    b. If BTC price is sufficiently lower than the "average entry" price for the position, more USDC will be deployed into the strategy, optionally splitting it between a spot buy and adding to the LP position.
+    a. If WETH price is sufficiently higher than the "average entry" price for the position, a portion will be sold and the profits from the sale will be optionally transferred to a "profit", "tax" and "principle" wallet.
+    b. If WETH price is sufficiently lower than the "average entry" price for the position, more USDC will be deployed into the strategy, optionally splitting it between a spot buy and adding to the LP position.
 4. The next period begins, and ATLIS creates an LP position within a price band around the entry price (#TODO i think we need two diff LP positions for once spot and entry price diverge, because otherwise we might buy too high and sell too low).
 
 # Yield sources
