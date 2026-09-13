@@ -52,7 +52,7 @@ Seeded with USDC. Ships **6 concentrated range positions** covering rungs `rl`
 down to `rl-5`. Rung set fixed at construction.
 
 ### Sell proxy
-Seeded with BTC. Ships **6 concentrated range positions** covering rungs `rh`
+Seeded with WETH. Ships **6 concentrated range positions** covering rungs `rh`
 up to `rh+5`. Rung set fixed at construction.
 
 Proxies are dumb: they hold assets, hold shipped strategies, and transfer on
@@ -68,15 +68,15 @@ both legs; this is expected and desirable.
 ## 3. Asset segregation
 
 **Only one asset type is ever transferred into a proxy** — USDC into buy
-proxies, BTC into sell proxies. A proxy will nonetheless come to hold both as
+proxies, WETH into sell proxies. A proxy will nonetheless come to hold both as
 price moves through its bands. That is normal and is not corrected until the
 next rebalance, when the proxy is fully emptied.
 
 Because every proxy starts each period holding exactly one asset, its net
 delta over the period has a known sign:
 
-- buy proxy: BTC delta >= 0, USDC delta <= 0
-- sell proxy: BTC delta <= 0, USDC delta >= 0
+- buy proxy: WETH delta >= 0, USDC delta <= 0
+- sell proxy: WETH delta <= 0, USDC delta >= 0
 
 ## 4. Order placement (clamped)
 
@@ -113,7 +113,7 @@ operation the keeper may run at any time between rebalances.
 2. **Trade.** Execute Manager-side Uniswap buys or sells.
 3. **Re-account.** Recompute `avgEntry` and PnL including the Uniswap fills.
 4. **Deploy.** Compute target `rl` / `rh` against current spot, resolve or
-   deploy the target proxies, and transfer USDC to the buy proxy and BTC to
+   deploy the target proxies, and transfer USDC to the buy proxy and WETH to
    the sell proxy for this round.
 
 ## 6. Keeper deposits
@@ -121,8 +121,8 @@ operation the keeper may run at any time between rebalances.
 The keeper may add capital at a rebalance:
 
 - **USDC** — increases buy-side capital. No cost-basis effect.
-- **BTC** — must arrive with the USDC price it was acquired at. Both
-  `inventoryBtc` and `costBasisUsdc` increase, so `avgEntry` updates as if the
+- **WETH** — must arrive with the USDC price it was acquired at. Both
+  `inventoryWeth` and `costBasisUsdc` increase, so `avgEntry` updates as if the
   vault had bought it directly.
 
 Deposits go to the Manager, never directly to a proxy. Assets sent directly to
@@ -135,22 +135,22 @@ All in the Manager. Aggregated across dry powder and every proxy.
 
 | Field | Meaning |
 |---|---|
-| `costBasisUsdc` | USDC paid for currently held BTC |
-| `inventoryBtc` | BTC currently held |
-| `avgEntry` | `costBasisUsdc / inventoryBtc` |
+| `costBasisUsdc` | USDC paid for currently held WETH |
+| `inventoryWeth` | WETH currently held |
+| `avgEntry` | `costBasisUsdc / inventoryWeth` |
 | `realizedUsdc` | Lifetime proceeds swept to the profit vault |
 
 ### Net-delta collapse
 
 A period's activity in a proxy — however many fills, in whichever directions —
-is collapsed into **one trade**: the USDC delta against the BTC delta.
+is collapsed into **one trade**: the USDC delta against the WETH delta.
 
 ```
-buy proxy:   acquired  = +BTC delta, paid     = -USDC delta
-             costBasisUsdc += paid;  inventoryBtc += acquired
+buy proxy:   acquired  = +WETH delta, paid     = -USDC delta
+             costBasisUsdc += paid;  inventoryWeth += acquired
 
-sell proxy:  disposed  = -BTC delta, received = +USDC delta
-             cost of disposed slice = costBasisUsdc * disposed / inventoryBtc
+sell proxy:  disposed  = -WETH delta, received = +USDC delta
+             cost of disposed slice = costBasisUsdc * disposed / inventoryWeth
              realized += received - that slice
              remove disposed and its slice proportionally
 ```
@@ -162,13 +162,13 @@ lower `avgEntry` instead of reaching the profit vault, and total equity is
 unaffected either way.
 
 Selling removes a proportional slice of both `costBasisUsdc` and
-`inventoryBtc`, so `avgEntry` is unchanged by sells. `avgEntry` falls only
-when BTC is acquired.
+`inventoryWeth`, so `avgEntry` is unchanged by sells. `avgEntry` falls only
+when WETH is acquired.
 
 ### Reporting
 
 - Realized: proceeds swept out. Permanently out of scope for PnL.
-- Unrealized: `inventoryBtc` marked to spot, minus `costBasisUsdc`.
+- Unrealized: `inventoryWeth` marked to spot, minus `costBasisUsdc`.
 
 Realized alone is not a performance measure: profits leave permanently while
 losses remain in inventory, so realized skews positive through arbitrarily
@@ -317,7 +317,7 @@ pricePaid   = usdcSpent / wethAcquired
 ```
 
 The Manager folds `usdcSpent` and `wethAcquired` into `costBasisUsdc` and
-`inventoryBtc` exactly as in Section 7. Sell-side harvests are the mirror and
+`inventoryWeth` exactly as in Section 7. Sell-side harvests are the mirror and
 are booked as disposals.
 
 **Caveat:** this arithmetic is only valid if nothing other than fills moved the
