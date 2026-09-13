@@ -280,6 +280,22 @@ contract LadderProxy is Ownable {
         if (w != 0) weth.safeTransfer(to, w);
     }
 
+    /// @notice Transfers the entire real balance of a single `token` to `to`,
+    ///         leaving the other token untouched. Used by harvest to pull only
+    ///         the ACQUIRED token, so the seed side keeps quoting (spec §12).
+    /// @dev Does not dock and does not touch Aqua's declared balance, so the
+    ///      strategy keeps quoting the harvested side at a depth it can no
+    ///      longer honour — accepted per §12 (resolvers simulate before
+    ///      routing, so an unfillable quote is simply not selected).
+    /// @return amount The token amount transferred out.
+    function pullToken(address token, address to) external onlyOwner returns (uint256 amount) {
+        if (to == address(0)) revert ZeroAddress();
+        if (token != address(usdc) && token != address(weth)) revert UnknownToken();
+
+        amount = IERC20(token).balanceOf(address(this));
+        if (amount != 0) IERC20(token).safeTransfer(to, amount);
+    }
+
     /// @notice The only token that may be allocated or topped up here.
     function seedToken() public view returns (IERC20) {
         return isBuySide ? usdc : weth;
